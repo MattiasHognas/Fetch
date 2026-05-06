@@ -41,6 +41,7 @@ public sealed class AgentLoop
         var transcript = BuildInitialPrompt(task, plan);
         var failedRuns = 0;
         var hasGroundingEvidence = false;
+        var repeatedBlockedToolCalls = 0;
         for (var step = 0; step < _config.MaxAgentSteps; step++)
         {
             transcript = await CompactTranscriptIfNeededAsync(task, transcript);
@@ -61,7 +62,9 @@ public sealed class AgentLoop
             });
             if (!JsonHelper.TryParseObject(response, out JsonDocument? doc, out var cleaned) || doc is null)
             {
-                transcript += "\nReturn ONLY one valid JSON object with no prose, no fenced code block, and no tool-call markup.";
+                transcript += LooksLikeDraftContent(response)
+                    ? "\nThat was prose or draft diagram content, not an executable step. Do not draft the architecture yet. Your next response must be exactly one JSON tool call, preferably refine_context, read_ranges, or another concrete read/search step. Do not repeat repo_tree with the same input."
+                    : "\nReturn ONLY one valid JSON object with no prose, no fenced code block, and no tool-call markup.";
                 await _logger.LogAsync("error", new
                 {
                     step,
@@ -136,6 +139,21 @@ public sealed class AgentLoop
                     tool = toolName,
                     result = TrimToolResult(result)
                 });
+                repeatedBlockedToolCalls = result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                    ? repeatedBlockedToolCalls + 1
+                    : 0;
+                if (repeatedBlockedToolCalls >= 3)
+                {
+                    var blocker = $"Blocked: the agent is repeatedly retrying {toolName} with the same input after explicit loop-prevention errors. It must switch to a different tool or query instead of continuing this run.";
+                    _events.Add(AgentEventType.Final, "Final", blocker);
+                    await _logger.LogAsync("final", new
+                    {
+                        text = blocker
+                    });
+                    Console.WriteLine(blocker);
+                    return;
+                }
                 hasGroundingEvidence = hasGroundingEvidence || IsGroundingEvidence(toolName, result);
                 var recoveryGuidance = BuildRecoveryGuidance(toolName, result);
                 string? analysis = null;
@@ -172,8 +190,16 @@ public sealed class AgentLoop
     {
         return toolName switch
         {
+            "semantic_search" when !result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
+                => "Use these semantic_search results to narrow to 3-8 concrete files with refine_context or read_ranges. Do not jump back to repo_tree with the same broad input.",
+            "repo_tree" when !result.StartsWith("Repeated", StringComparison.OrdinalIgnoreCase)
+                => "Repo tree only gives broad structure. Your next step should be a more specific search or read tool, or a different repo_tree depth if you truly need different structure evidence.",
             "semantic_search" when result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
                 => "Semantic search is unavailable until the index is built. Do not call semantic_search again in this run. Use repo_tree, search_files, search_content, and refine_context to gather evidence instead.",
+            "repo_tree" when result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                => "Do not call repo_tree again with the same input. Choose a different tool such as semantic_search, search_content, refine_context, or read_ranges.",
+            "repo_tree" when result.StartsWith("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                => "Do not call repo_tree again with the same input. Choose a different tool such as semantic_search, search_content, refine_context, or read_ranges.",
             _ when result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
                 => "Do not repeat the same discovery tool call with the same input. Refine the query, choose a more specific read/search tool, or move on to the next evidence-gathering step.",
             "read_ranges" when result.StartsWith("Invalid range JSON:", StringComparison.OrdinalIgnoreCase)
@@ -246,6 +272,33 @@ public sealed class AgentLoop
         ];
 
         return prematurePhrases.Any(phrase => normalized.Contains(phrase, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool LooksLikeDraftContent(string response)
+    {
+        if (string.IsNullOrWhiteSpace(response))
+        {
+            return false;
+        }
+
+        string[] markers =
+        [
+            "```mermaid",
+            "graph td",
+            "graph lr",
+            "flowchart ",
+            "sequencediagram",
+            "classdiagram",
+            "statediagram",
+            "erdiagram",
+            "gantt",
+            "mindmap",
+            "quadrantchart",
+            "# architecture",
+            "## architecture"
+        ];
+
+        return markers.Any(marker => response.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task<string> CompactTranscriptIfNeededAsync(string task, string transcript)
@@ -450,10 +503,7 @@ public sealed class AgentLoop
         return !IsDiscoveryFailure(trimmed);
     }
 
-    private static bool IsDiscoveryTool(string toolName)
-    {
-        return toolName is "repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files";
-    }
+    private static bool IsDiscoveryTool(string toolName) => toolName is "repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files";
 
     private static bool IsDiscoveryFailure(string result)
     {

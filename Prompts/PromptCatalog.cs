@@ -45,6 +45,7 @@ Rules:
 - If semantic search status is ready and the task is architecture, documentation, or repo-wide discovery, prefer semantic_search early before falling back to plain text search.
 - Use search_content for exact identifiers, errors, or text.
 - Use refine_context on semantic_search/search_content results to choose exact line ranges.
+- After semantic_search or search_content returns useful hits, prefer refine_context or read_ranges next instead of going back to repo_tree with the same broad input.
 - Use read_ranges for focused context.
 - read_ranges accepts either [{"file":"Program.cs","start":1,"end":50}] or {"file":"Program.cs","start":1,"end":50}.
 - When you use read_ranges, prefer explicit start and end values instead of omitting them.
@@ -111,6 +112,7 @@ Rules:
 - If a write is blocked for missing grounding evidence, your very next response must be a single search/read tool call. Do not repeat the blocked write tool.
 - Never repeat the exact same tool call after it already failed. Change tools or change the input.
 - If semantic_search reports that the index is missing, do not retry it in the same run. Use repo_tree, search_files, search_content, and refine_context instead.
+- After semantic_search or search_content returns useful hits, prefer refine_context or read_ranges next instead of going back to repo_tree with the same broad input.
 - read_ranges accepts either [{"file":"Program.cs","start":1,"end":50}] or {"file":"Program.cs","start":1,"end":50}.
 - When you use read_ranges, prefer explicit start and end values instead of omitting them.
 - For architecture, documentation, or repo-wide behavior tasks, gather evidence from multiple relevant files first. Prefer repo_tree, search_content, refine_context, and context_pack over a single-file read_ranges call unless the task is clearly local to one file.
@@ -141,6 +143,7 @@ Important input shapes:
 - Return exactly one tool choice. Do not suggest multiple tool calls in one response.
 - If semantic search status is ready and the task is architecture, documentation, or repo-wide discovery, prefer semantic_search early.
 - If recent state says "Semantic index missing", do not choose semantic_search. Choose repo_tree, search_files, search_content, or refine_context instead.
+- If recent state already contains a successful semantic_search or search_content result, prefer refine_context or read_ranges over repeating repo_tree with the same input.
 - For architecture, documentation, or repo-wide tasks, prefer repo_tree, search_content, refine_context, or context_pack before a single-file read_ranges call.
 - If you choose read_ranges, the inputHint should include explicit start and end values.
 - If recent state says grounding is required, do not choose apply_diff, apply_patch, or create_file next. Choose a search/read tool instead.
@@ -171,6 +174,12 @@ Test/build status:
 Open todos:
 Important constraints:
 Next best step:
+Rules:
+- Use only facts explicitly present in the transcript.
+- Do not claim a task is completed unless the transcript shows a successful final result or successful file edits that satisfy the task.
+- Preserve blockers, repeated failed tool calls, invalid JSON/prose responses, and loop-prevention errors under Important constraints or Open todos.
+- Files changed must be empty or "None" unless a create/edit/delete tool actually succeeded.
+- If the run is stuck, Next best step should describe the concrete recovery action, not a generic summary.
 Transcript:
 {{transcript}}
 """,
