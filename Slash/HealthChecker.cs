@@ -51,6 +51,7 @@ public sealed class HealthChecker(AgentConfig config, PathSandbox sandbox)
             return "INFO  LSP: no servers configured";
         }
 
+        var selector = new LspServerSelector(_config, _sandbox);
         var lines = new List<string> { "LSP servers:" };
         foreach (LspServerConfig s in _config.Lsp.Servers)
         {
@@ -59,8 +60,8 @@ public sealed class HealthChecker(AgentConfig config, PathSandbox sandbox)
                 lines.Add($"  INFO {s.Id}: disabled");
                 continue;
             }
-            var cmd = CommandExists(s.Command);
-            var marker = s.RootMarkers.Any(m => File.Exists(Path.Combine(_sandbox.Root, m)));
+            var cmd = LspServerSelector.CommandOk(s);
+            var marker = selector.RootMarkerOk(s);
             var status = !cmd ? "WARN" : marker ? "OK" : "INFO";
             lines.Add($"  {status,-4} {s.Id}: command={s.Command} commandOk={cmd} rootMarkerOk={marker}");
         }

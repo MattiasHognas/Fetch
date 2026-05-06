@@ -40,6 +40,7 @@ public sealed class AgentLoop
         await PlannerTodoSeeder.SeedAsync(plan, _todoStore);
         var transcript = BuildInitialPrompt(task, plan);
         var failedRuns = 0;
+        var hasGroundingEvidence = false;
         for (var step = 0; step < _config.MaxAgentSteps; step++)
         {
             transcript = await CompactTranscriptIfNeededAsync(task, transcript);
@@ -75,6 +76,17 @@ public sealed class AgentLoop
                 if (root.TryGetProperty("final", out JsonElement final))
                 {
                     var text = ReadJsonValue(final);
+                    if (ShouldRejectPrematureFinal(text, step))
+                    {
+                        transcript += "\nDo not return final for a plan, a next step, or partial progress. If work remains, return a tool call as {\"tool\":\"name\",\"input\":\"value\"}.";
+                        await _logger.LogAsync("error", new
+                        {
+                            step,
+                            kind = "premature_final",
+                            text
+                        });
+                        continue;
+                    }
                     _events.Add(AgentEventType.Final, "Final", text);
                     await _logger.LogAsync("final", new
                     {
@@ -108,7 +120,9 @@ public sealed class AgentLoop
                     tool = toolName,
                     input
                 });
-                var result = await ExecuteToolAsync(tool, input);
+                var result = TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
+                    ? Record(tool, input, groundingFailure, true)
+                    : await ExecuteToolAsync(tool, input);
                 _events.Add(AgentEventType.ToolResult, $"Tool result: {toolName}", result, toolName, input);
                 await _logger.LogAsync("tool_result", new
                 {
@@ -116,6 +130,7 @@ public sealed class AgentLoop
                     tool = toolName,
                     result = TrimToolResult(result)
                 });
+                hasGroundingEvidence = hasGroundingEvidence || IsGroundingEvidence(toolName, result);
                 var recoveryGuidance = BuildRecoveryGuidance(toolName, result);
                 string? analysis = null;
                 if (toolName == "run_command")
@@ -159,6 +174,12 @@ public sealed class AgentLoop
                 => "Do not return final yet. Read the current file contents again and retry apply_patch with exact current text.",
             "read_file" when result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
                 => "If the file does not exist yet, create it with apply_diff using a full add-file patch instead of returning final.",
+            "create_file" when result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase)
+                => "Do not invent documentation content. Use repo_tree, search_content, read_file, read_ranges, or context_pack to gather evidence first, then retry the write.",
+            "apply_diff" when result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase)
+                => "Do not invent documentation content. Gather concrete repo evidence before applying a docs patch.",
+            "apply_patch" when result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase)
+                => "Do not invent documentation content. Read and search the repo first, then retry the docs edit.",
             _ => null
         };
     }
@@ -177,6 +198,36 @@ public sealed class AgentLoop
             JsonValueKind.Null => "",
             _ => value.GetRawText()
         };
+    }
+
+    private static bool ShouldRejectPrematureFinal(string text, int step)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return true;
+        }
+
+        var normalized = text.Trim();
+        if (step == 0)
+        {
+            return true;
+        }
+
+        string[] prematurePhrases =
+        [
+            "first step",
+            "next step",
+            "let's start",
+            "the task is to",
+            "the first step",
+            "we need to",
+            "involves",
+            "before proceeding",
+            "searching for relevant files",
+            "ensure that we can identify"
+        ];
+
+        return prematurePhrases.Any(phrase => normalized.Contains(phrase, StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task<string> CompactTranscriptIfNeededAsync(string task, string transcript)
@@ -217,6 +268,10 @@ public sealed class AgentLoop
         if (decision == ApprovalDecision.Ask)
         {
             var preview = tool is IPreviewableTool p ? await p.PreviewAsync(input) : null;
+            if (IsFailedPreview(tool, preview))
+            {
+                return Record(tool, input, preview!, true);
+            }
             var approved = await RequestApprovalAsync(tool.Name, input, preview);
             if (!approved)
             {
@@ -274,6 +329,8 @@ public sealed class AgentLoop
             : result.StartsWith("FAIL", StringComparison.OrdinalIgnoreCase)
             || result.StartsWith("Tool failed:", StringComparison.OrdinalIgnoreCase)
             || result.StartsWith("Patch failed.", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Patch validation failed:", StringComparison.OrdinalIgnoreCase)
             || result.Contains("Denied by approval policy", StringComparison.OrdinalIgnoreCase)
             || result.Contains("Approval denied.", StringComparison.OrdinalIgnoreCase) || tool.Name switch
             {
@@ -289,6 +346,103 @@ public sealed class AgentLoop
                 _ => false
             };
     }
+
+    private static bool IsFailedPreview(ITool tool, string? preview)
+    {
+        return !string.IsNullOrWhiteSpace(preview) && tool.Name switch
+        {
+            "apply_diff" => preview.StartsWith("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
+                || preview.StartsWith("Patch validation failed:", StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+    }
+
+    private static bool TryBlockUngroundedWrite(ITool tool, string input, bool hasGroundingEvidence, out string failure)
+    {
+        failure = "";
+        if (hasGroundingEvidence || !RequiresGroundingEvidence(tool.Name, input))
+        {
+            return false;
+        }
+
+        failure = "Grounding required before writing documentation. Search or read repo files first and only write after you have concrete evidence from this codebase.";
+        return true;
+    }
+
+    private static bool RequiresGroundingEvidence(string toolName, string input)
+    {
+        return toolName switch
+        {
+            "create_file" => TryGetCreateFilePath(input, out var createPath) && IsDocumentationPath(createPath),
+            "apply_patch" => TryGetDelimitedPath(input, out var patchPath) && IsDocumentationPath(patchPath),
+            "apply_diff" => TryGetDiffPaths(input).Any(IsDocumentationPath),
+            _ => false
+        };
+    }
+
+    private static bool IsGroundingEvidence(string toolName, string result)
+    {
+        if (string.IsNullOrWhiteSpace(result))
+        {
+            return false;
+        }
+
+        if (toolName is not ("repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files"))
+        {
+            return false;
+        }
+
+        var trimmed = result.TrimStart();
+        return !IsDiscoveryFailure(trimmed);
+    }
+
+    private static bool IsDiscoveryFailure(string result)
+    {
+        return result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("No configured LSP server available.", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("LSP symbol search failed:", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("LSP references search failed:", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("LSP server", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("ripgrep (rg) is not installed.", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("rg:", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Empty search.", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Not found:", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Directory not found:", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryGetCreateFilePath(string input, out string path) => TryGetDelimitedPath(input, out path);
+
+    private static bool TryGetDelimitedPath(string input, out string path)
+    {
+        var parts = input.Split("|||", 2);
+        path = parts.Length == 0 ? "" : parts[0].Trim();
+        return !string.IsNullOrWhiteSpace(path);
+    }
+
+    private static string[] TryGetDiffPaths(string input)
+    {
+        try
+        {
+            return PatchParser.Parse(input).Select(op => op.Path).ToArray();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static bool IsDocumentationPath(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        return normalized.StartsWith("docs/", StringComparison.OrdinalIgnoreCase)
+            || normalized.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
+            || normalized.EndsWith(".mdx", StringComparison.OrdinalIgnoreCase)
+            || normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
+    }
+
     private string BuildInitialPrompt(string task, string plan) => _prompts.Render(PromptId.AgentInitial, new() { ["agent_md"] = _agentMd ?? "", ["previous_summary"] = _session.ReadSummary(), ["recent_log"] = _session.RecentLogTail(), ["plan"] = plan, ["tools"] = RenderTools(), ["task"] = task });
     private string BuildCompactedPrompt(string task, string summary) => _prompts.Render(PromptId.AgentCompacted, new() { ["agent_md"] = _agentMd ?? "", ["task"] = task, ["summary"] = summary, ["tools"] = RenderTools() });
     private string RenderTools() => string.Join("\n", _tools.Values.Select(t => $"- {t.Name}: {t.Description}"));

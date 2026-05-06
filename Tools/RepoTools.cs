@@ -96,7 +96,16 @@ public sealed class SearchContentTool(PathSandbox sandbox) : ITool
             return "ripgrep (rg) is not installed.";
         }
 
-        var psi = new ProcessStartInfo { FileName = "rg", Arguments = $"--line-number --hidden --glob !.git --glob !.agent {Quote(query)} .", WorkingDirectory = _sandbox.Root, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        var psi = new ProcessStartInfo { FileName = "rg", WorkingDirectory = _sandbox.Root, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        psi.ArgumentList.Add("--line-number");
+        psi.ArgumentList.Add("--hidden");
+        psi.ArgumentList.Add("--glob");
+        psi.ArgumentList.Add("!.git");
+        psi.ArgumentList.Add("--glob");
+        psi.ArgumentList.Add("!.agent");
+        psi.ArgumentList.Add("-e");
+        psi.ArgumentList.Add(query);
+        psi.ArgumentList.Add(".");
         Process p = Process.Start(psi)!;
         var output = await p.StandardOutput.ReadToEndAsync();
         var error = await p.StandardError.ReadToEndAsync();
@@ -104,6 +113,5 @@ public sealed class SearchContentTool(PathSandbox sandbox) : ITool
         var text = string.IsNullOrWhiteSpace(output) ? error : output;
         return text.Length > 12000 ? text[..12000] + "\n[truncated]" : text;
     }
-    private static string Quote(string s) => OperatingSystem.IsWindows() ? $"\"{s.Replace("\"", "\\\"")}\"" : $"'{s.Replace("'", "'\\''")}'";
     private static bool CommandExists(string command) => (Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? []).Any(p => File.Exists(Path.Combine(p, OperatingSystem.IsWindows() ? command + ".exe" : command)));
 }

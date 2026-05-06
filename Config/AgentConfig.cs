@@ -52,6 +52,8 @@ public sealed class AgentConfig
         }
         var raw = File.ReadAllText(path);
         config = JsonSerializer.Deserialize<AgentConfig>(raw, JsonOptions()) ?? new AgentConfig();
+        config.Lsp ??= new LspConfig();
+        EnsureDefaultLspServers(config.Lsp);
         config.ConfigPath = path;
         var normalized = JsonSerializer.Serialize(config, JsonOptions());
         if (!string.Equals(raw.Trim(), normalized.Trim(), StringComparison.Ordinal))
@@ -77,6 +79,53 @@ public sealed class AgentConfig
         WriteIndented = true,
         PropertyNameCaseInsensitive = true
     };
+
+    public static List<LspServerConfig> CreateDefaultLspServers() =>
+    [
+        new() { Id="go", Language="go", Command="gopls", FileExtensions=[".go"], RootMarkers=["go.mod"] },
+        new() { Id="rust", Language="rust", Command="rust-analyzer", FileExtensions=[".rs"], RootMarkers=["Cargo.toml"] },
+        new() { Id="typescript", Language="typescript", Command="typescript-language-server", Args=["--stdio"], FileExtensions=[".ts", ".tsx", ".js", ".jsx"], RootMarkers=["package.json", "tsconfig.json"] },
+        new() { Id="csharp", Language="csharp", Command="csharp-ls", FileExtensions=[".cs", ".csx"], RootMarkers=["*.csproj", "*.sln", "Directory.Build.props"] }
+    ];
+
+    private static void EnsureDefaultLspServers(LspConfig lsp)
+    {
+        lsp.Servers ??= [];
+        foreach (LspServerConfig server in CreateDefaultLspServers())
+        {
+            LspServerConfig? existing = lsp.Servers.FirstOrDefault(s => string.Equals(s.Id, server.Id, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                lsp.Servers.Add(server);
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(existing.Language))
+            {
+                existing.Language = server.Language;
+            }
+
+            if (string.IsNullOrWhiteSpace(existing.Command))
+            {
+                existing.Command = server.Command;
+            }
+
+            if ((existing.Args?.Length ?? 0) == 0)
+            {
+                existing.Args = server.Args;
+            }
+
+            if ((existing.FileExtensions?.Length ?? 0) == 0)
+            {
+                existing.FileExtensions = server.FileExtensions;
+            }
+
+            if ((existing.RootMarkers?.Length ?? 0) == 0)
+            {
+                existing.RootMarkers = server.RootMarkers;
+            }
+        }
+    }
 }
 
 public sealed class LspConfig
@@ -89,11 +138,7 @@ public sealed class LspConfig
     {
         get; set;
     } =
-    [
-        new() { Id="go", Language="go", Command="gopls", FileExtensions=[".go"], RootMarkers=["go.mod"] },
-        new() { Id="rust", Language="rust", Command="rust-analyzer", FileExtensions=[".rs"], RootMarkers=["Cargo.toml"] },
-        new() { Id="typescript", Language="typescript", Command="typescript-language-server", Args=["--stdio"], FileExtensions=[".ts", ".tsx", ".js", ".jsx"], RootMarkers=["package.json", "tsconfig.json"] }
-    ];
+        AgentConfig.CreateDefaultLspServers();
 }
 
 public sealed class LspServerConfig

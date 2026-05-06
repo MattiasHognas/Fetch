@@ -8,7 +8,32 @@ public sealed class LspServerSelector(AgentConfig config, PathSandbox sandbox)
     {
         return !_config.Lsp.Enabled
             ? null
-            : _config.Lsp.Servers.FirstOrDefault(s => s.Enabled && s.RootMarkers.Any(m => File.Exists(Path.Combine(_sandbox.Root, m))) && CommandExists(s.Command));
+            : _config.Lsp.Servers.FirstOrDefault(s => s.Enabled && RootMarkerOk(s) && CommandOk(s));
     }
+
+    public bool RootMarkerOk(LspServerConfig server)
+    {
+        return server.RootMarkers.Length == 0 || server.RootMarkers.Any(MarkerExists);
+    }
+
+    public static bool CommandOk(LspServerConfig server) => CommandExists(server.Command);
+
+    private bool MarkerExists(string marker)
+    {
+        var trimmed = marker.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            return false;
+        }
+
+        if (trimmed.IndexOfAny(['*', '?']) >= 0)
+        {
+            return Directory.EnumerateFileSystemEntries(_sandbox.Root, trimmed, SearchOption.TopDirectoryOnly).Any();
+        }
+
+        var path = Path.Combine(_sandbox.Root, trimmed);
+        return File.Exists(path) || Directory.Exists(path);
+    }
+
     private static bool CommandExists(string command) => (Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? []).Any(p => File.Exists(Path.Combine(p, OperatingSystem.IsWindows() ? command + ".exe" : command)));
 }
