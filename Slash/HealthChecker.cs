@@ -61,7 +61,7 @@ public sealed class HealthChecker(AgentConfig config, PathSandbox sandbox)
             }
             var cmd = CommandExists(s.Command);
             var marker = s.RootMarkers.Any(m => File.Exists(Path.Combine(_sandbox.Root, m)));
-            var status = cmd && marker ? "OK" : "WARN";
+            var status = !cmd ? "WARN" : marker ? "OK" : "INFO";
             lines.Add($"  {status,-4} {s.Id}: command={s.Command} commandOk={cmd} rootMarkerOk={marker}");
         }
         return string.Join(Environment.NewLine, lines);
