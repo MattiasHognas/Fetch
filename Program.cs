@@ -20,11 +20,14 @@ static Runtime BuildRuntime(string? sessionId, bool newSession)
     var fileReads = new FileReadRegistry();
     var policy = new CommandPolicy(config);
     var embeddings = new EmbeddingClient(config);
-    var semanticIndex = new SemanticIndex(config, sandbox, secrets, embeddings);
+    var semanticIndex = new SemanticIndex(config, sandbox, secrets, embeddings, ignore);
     var searchContent = new SearchContentTool(sandbox);
     var lspSelector = new LspServerSelector(config, sandbox);
     var contextRefiner = new ContextRefiner(llm, prompts);
-    var state = new AgentRuntimeState();
+    var state = new AgentRuntimeState
+    {
+        SemanticSearchReady = semanticIndex.Exists
+    };
     var events = new AgentEventStore();
 
     ITool[] tools =

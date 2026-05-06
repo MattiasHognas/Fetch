@@ -167,6 +167,7 @@ public sealed class SlashCommandHandler(AgentSession session, TodoStore todoStor
     {
         Console.WriteLine("Building semantic index...");
         SemanticIndexStats stats = await _semanticIndex.BuildAsync();
+        _state.SemanticSearchReady = _semanticIndex.Exists;
         Console.WriteLine("Semantic index built.");
         Console.WriteLine($"Indexed files: {stats.IndexedFiles}");
         Console.WriteLine($"Reused files: {stats.ReusedFiles}");

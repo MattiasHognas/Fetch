@@ -44,7 +44,7 @@ public sealed class AgentLoop
         for (var step = 0; step < _config.MaxAgentSteps; step++)
         {
             transcript = await CompactTranscriptIfNeededAsync(task, transcript);
-            var route = await _router.ChooseAsync(task, transcript, _tools.Values);
+            var route = await _router.ChooseAsync(task, transcript, _tools.Values, _state.SemanticSearchReady);
             await _logger.LogAsync("tool_route", new
             {
                 step,
@@ -97,7 +97,9 @@ public sealed class AgentLoop
                 }
                 if (!root.TryGetProperty("tool", out JsonElement t) || !root.TryGetProperty("input", out JsonElement inp))
                 {
-                    transcript += "\nReturn either {\"tool\":\"name\",\"input\":\"value\"} or {\"final\":\"answer\"}.";
+                    transcript += root.TryGetProperty("tool", out _) && (root.TryGetProperty("reason", out _) || root.TryGetProperty("inputHint", out _))
+                        ? "\nThat was a router-style suggestion, not an executable tool call. Execute exactly one tool now and include a real input value as {\"tool\":\"name\",\"input\":\"value\"}."
+                        : "\nReturn either {\"tool\":\"name\",\"input\":\"value\"} or {\"final\":\"answer\"}.";
                     continue;
                 }
                 var toolName = t.ValueKind == JsonValueKind.String ? t.GetString() ?? "" : "";
@@ -120,9 +122,13 @@ public sealed class AgentLoop
                     tool = toolName,
                     input
                 });
-                var result = TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
-                    ? Record(tool, input, groundingFailure, true)
-                    : await ExecuteToolAsync(tool, input);
+                var result = TryBlockRepeatedDiscoveryToolCall(toolName, input, out var repeatedDiscoveryFailure)
+                    ? Record(tool, input, repeatedDiscoveryFailure, true)
+                    : TryBlockRepeatedFailedToolCall(toolName, input, out var repeatedFailure)
+                    ? Record(tool, input, repeatedFailure, true)
+                    : TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
+                        ? Record(tool, input, groundingFailure, true)
+                        : await ExecuteToolAsync(tool, input);
                 _events.Add(AgentEventType.ToolResult, $"Tool result: {toolName}", result, toolName, input);
                 await _logger.LogAsync("tool_result", new
                 {
@@ -166,8 +172,18 @@ public sealed class AgentLoop
     {
         return toolName switch
         {
+            "semantic_search" when result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
+                => "Semantic search is unavailable until the index is built. Do not call semantic_search again in this run. Use repo_tree, search_files, search_content, and refine_context to gather evidence instead.",
+            _ when result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                => "Do not repeat the same discovery tool call with the same input. Refine the query, choose a more specific read/search tool, or move on to the next evidence-gathering step.",
+            "read_ranges" when result.StartsWith("Invalid range JSON:", StringComparison.OrdinalIgnoreCase)
+                => "Retry read_ranges with JSON shaped like [{\"file\":\"Program.cs\",\"start\":1,\"end\":50}] or {\"file\":\"Program.cs\",\"start\":1,\"end\":50}.",
+            "apply_diff" when result.StartsWith("Patch validation failed:\nFile already exists:", StringComparison.OrdinalIgnoreCase)
+                => "The target file already exists. Read its current contents, then retry apply_diff with *** Update File instead of *** Add File. Do not repeat the same add-file patch.",
             "apply_diff" when result.StartsWith("Patch failed.", StringComparison.OrdinalIgnoreCase)
                 => "Do not return final yet. Read the relevant file or confirm it does not exist, then retry apply_diff with a full patch beginning with *** Begin Patch.",
+            "apply_diff" when result.StartsWith("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
+                => "Retry apply_diff with a real patch, for example: *** Begin Patch\n*** Add File: docs/ARCHITECTURE.md\n+# Architecture\n*** End Patch. Do not use path|||content or +path|||... pseudo-patches.",
             "apply_patch" when result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
                 || result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
                 || result.StartsWith("Old text not found.", StringComparison.OrdinalIgnoreCase)
@@ -175,11 +191,13 @@ public sealed class AgentLoop
             "read_file" when result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
                 => "If the file does not exist yet, create it with apply_diff using a full add-file patch instead of returning final.",
             "create_file" when result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase)
-                => "Do not invent documentation content. Use repo_tree, search_content, read_file, read_ranges, or context_pack to gather evidence first, then retry the write.",
+                => "Do not invent documentation content. Your next response must be a single read/search tool call such as repo_tree, search_files, search_content, read_file, read_ranges, or context_pack. Do not retry the write yet.",
             "apply_diff" when result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase)
-                => "Do not invent documentation content. Gather concrete repo evidence before applying a docs patch.",
+                => "Do not invent documentation content. Your next response must be a single read/search tool call such as repo_tree, search_files, search_content, read_file, read_ranges, or context_pack. Do not retry apply_diff yet.",
             "apply_patch" when result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase)
-                => "Do not invent documentation content. Read and search the repo first, then retry the docs edit.",
+                => "Do not invent documentation content. Your next response must be a single read/search tool call such as repo_tree, search_files, search_content, read_file, read_ranges, or context_pack. Do not retry the docs edit yet.",
+            _ when result.StartsWith("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                => "Do not repeat the same failing tool call. Choose a different tool or different input that addresses the error. If the failure was on a write, switch back to a search/read tool next.",
             _ => null
         };
     }
@@ -369,13 +387,49 @@ public sealed class AgentLoop
         return true;
     }
 
+    private bool TryBlockRepeatedFailedToolCall(string toolName, string input, out string failure)
+    {
+        failure = "";
+        ToolExecution? lastError = _state.LastError;
+        if (lastError is null || !lastError.IsError)
+        {
+            return false;
+        }
+
+        if (!string.Equals(lastError.Tool, toolName, StringComparison.Ordinal) || !string.Equals(lastError.Input, input, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        failure = $"Repeated failing tool call blocked. A previous attempt with {toolName} and the same input already failed. Read the last error and choose a different tool or different input instead of retrying the same call.";
+        return true;
+    }
+
+    private bool TryBlockRepeatedDiscoveryToolCall(string toolName, string input, out string failure)
+    {
+        failure = "";
+        ToolExecution? lastTool = _state.LastTool;
+        if (lastTool is null || lastTool.IsError || !IsDiscoveryTool(toolName))
+        {
+            return false;
+        }
+
+        if (!string.Equals(lastTool.Tool, toolName, StringComparison.Ordinal) || !string.Equals(lastTool.Input, input, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        failure = $"Repeated discovery tool call blocked. The previous {toolName} call with the same input already succeeded and will not produce new information. Refine the query or choose a different tool.";
+        return true;
+    }
+
     private static bool RequiresGroundingEvidence(string toolName, string input)
     {
         return toolName switch
         {
             "create_file" => TryGetCreateFilePath(input, out var createPath) && IsDocumentationPath(createPath),
             "apply_patch" => TryGetDelimitedPath(input, out var patchPath) && IsDocumentationPath(patchPath),
-            "apply_diff" => TryGetDiffPaths(input).Any(IsDocumentationPath),
+            "apply_diff" => TryGetDiffPaths(input).Any(IsDocumentationPath) || LooksLikeDocumentationWrite(input),
             _ => false
         };
     }
@@ -394,6 +448,11 @@ public sealed class AgentLoop
 
         var trimmed = result.TrimStart();
         return !IsDiscoveryFailure(trimmed);
+    }
+
+    private static bool IsDiscoveryTool(string toolName)
+    {
+        return toolName is "repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files";
     }
 
     private static bool IsDiscoveryFailure(string result)
@@ -426,12 +485,20 @@ public sealed class AgentLoop
     {
         try
         {
-            return PatchParser.Parse(input).Select(op => op.Path).ToArray();
+            return [.. PatchParser.Parse(input).Select(op => op.Path)];
         }
         catch
         {
             return [];
         }
+    }
+
+    private static bool LooksLikeDocumentationWrite(string input)
+    {
+        return input.Contains("docs/", StringComparison.OrdinalIgnoreCase)
+            || input.Contains(".md", StringComparison.OrdinalIgnoreCase)
+            || input.Contains(".mdx", StringComparison.OrdinalIgnoreCase)
+            || input.Contains(".txt", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsDocumentationPath(string path)
@@ -443,8 +510,8 @@ public sealed class AgentLoop
             || normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
     }
 
-    private string BuildInitialPrompt(string task, string plan) => _prompts.Render(PromptId.AgentInitial, new() { ["agent_md"] = _agentMd ?? "", ["previous_summary"] = _session.ReadSummary(), ["recent_log"] = _session.RecentLogTail(), ["plan"] = plan, ["tools"] = RenderTools(), ["task"] = task });
-    private string BuildCompactedPrompt(string task, string summary) => _prompts.Render(PromptId.AgentCompacted, new() { ["agent_md"] = _agentMd ?? "", ["task"] = task, ["summary"] = summary, ["tools"] = RenderTools() });
+    private string BuildInitialPrompt(string task, string plan) => _prompts.Render(PromptId.AgentInitial, new() { ["agent_md"] = _agentMd ?? "", ["previous_summary"] = _session.ReadSummary(), ["recent_log"] = _session.RecentLogTail(), ["plan"] = plan, ["tools"] = RenderTools(), ["task"] = task, ["semantic_search_status"] = _state.SemanticSearchReady ? "ready" : "missing" });
+    private string BuildCompactedPrompt(string task, string summary) => _prompts.Render(PromptId.AgentCompacted, new() { ["agent_md"] = _agentMd ?? "", ["task"] = task, ["summary"] = summary, ["tools"] = RenderTools(), ["semantic_search_status"] = _state.SemanticSearchReady ? "ready" : "missing" });
     private string RenderTools() => string.Join("\n", _tools.Values.Select(t => $"- {t.Name}: {t.Description}"));
     private string TrimToolResult(string text) => text.Length <= _config.MaxToolResultChars ? text : text[.._config.MaxToolResultChars] + "\n[tool result truncated]";
     private string? LoadAgentContext()

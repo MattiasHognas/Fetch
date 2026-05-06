@@ -54,13 +54,14 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
 {
     private readonly LlmClient _llm = llm; private readonly PromptCatalog _prompts = prompts;
 
-    public Task<string> ChooseAsync(string task, string transcript, IEnumerable<ITool> tools)
+    public Task<string> ChooseAsync(string task, string transcript, IEnumerable<ITool> tools, bool semanticSearchReady)
     {
         var p = _prompts.Render(PromptId.ToolRouter, new()
         {
             ["tools"] = string.Join("\n", tools.Select(t => $"- {t.Name}: {t.Description}")),
             ["task"] = task,
-            ["recent_state"] = Trim(transcript)
+            ["recent_state"] = Trim(transcript),
+            ["semantic_search_status"] = semanticSearchReady ? "ready" : "missing"
         });
         return _llm.ChatAsync(p);
     }

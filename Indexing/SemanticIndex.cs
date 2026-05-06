@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Fetch.Tools;
 
 namespace Fetch.Indexing;
 
@@ -20,9 +21,9 @@ public sealed class FileHashStore(string root)
     public static string Compute(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 }
 
-public sealed class SemanticIndex(AgentConfig config, PathSandbox sandbox, SecretPolicy secrets, EmbeddingClient embeddings)
+public sealed class SemanticIndex(AgentConfig config, PathSandbox sandbox, SecretPolicy secrets, EmbeddingClient embeddings, IgnoreRules ignore)
 {
-    private readonly AgentConfig _config = config; private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets; private readonly EmbeddingClient _embeddings = embeddings;
+    private readonly AgentConfig _config = config; private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets; private readonly EmbeddingClient _embeddings = embeddings; private readonly IgnoreRules _ignore = ignore;
     private string IndexPath => Path.Combine(_config.IndexRoot, "chunks.json"); public bool Exists => File.Exists(IndexPath);
 
     public async Task<SemanticIndexStats> BuildAsync()
@@ -78,7 +79,14 @@ public sealed class SemanticIndex(AgentConfig config, PathSandbox sandbox, Secre
 
         List<CodeChunk> chunks = JsonSerializer.Deserialize<List<CodeChunk>>(await File.ReadAllTextAsync(IndexPath), AgentConfig.JsonOptions()) ?? [];
         var q = await _embeddings.EmbedAsync(query);
-        var res = chunks.Select(c => new { Chunk = c, Score = Cosine(q, c.Embedding) }).OrderByDescending(x => x.Score).Take(topK ?? _config.SemanticSearchTopK);
+        var res = chunks
+            .Select(c => new
+            {
+                Chunk = c,
+                Score = Cosine(q, c.Embedding) + ScoreBoost(query, c)
+            })
+            .OrderByDescending(x => x.Score)
+            .Take(topK ?? _config.SemanticSearchTopK);
         return string.Join("\n\n", res.Select(r => $"Score: {r.Score:F3}\nFile: {r.Chunk.File}:{r.Chunk.StartLine}-{r.Chunk.EndLine}\n{r.Chunk.Text}"));
     }
     private IEnumerable<CodeChunk> ChunkFile(string rel, string text)
@@ -134,8 +142,79 @@ public sealed class SemanticIndex(AgentConfig config, PathSandbox sandbox, Secre
             return false;
         }
 
+        var rel = _sandbox.Relative(path);
+        if (_ignore.IsIgnored(rel) || IsLowSignalIndexedPath(rel))
+        {
+            return false;
+        }
+
         var ext = Path.GetExtension(path).ToLowerInvariant();
         return ext is ".cs" or ".ts" or ".tsx" or ".js" or ".jsx" or ".rs" or ".py" or ".go" or ".java" or ".kt" or ".md" or ".json" or ".yml" or ".yaml" or ".toml";
+    }
+
+    private static float ScoreBoost(string query, CodeChunk chunk)
+    {
+        var normalizedQuery = query.ToLowerInvariant();
+        var normalizedFile = chunk.File.Replace('\\', '/').ToLowerInvariant();
+        var ext = Path.GetExtension(normalizedFile);
+        var boost = 0f;
+
+        if (ext == ".cs")
+        {
+            boost += 0.08f;
+        }
+        else if (ext is ".ts" or ".tsx" or ".js" or ".jsx" or ".rs" or ".py" or ".go" or ".java" or ".kt")
+        {
+            boost += 0.05f;
+        }
+        else if (ext is ".json" or ".yml" or ".yaml" or ".toml")
+        {
+            boost -= 0.08f;
+        }
+
+        if (normalizedQuery.Contains("class", StringComparison.Ordinal)
+            || normalizedQuery.Contains("architecture", StringComparison.Ordinal)
+            || normalizedQuery.Contains("relationship", StringComparison.Ordinal)
+            || normalizedQuery.Contains("flow", StringComparison.Ordinal))
+        {
+            if (chunk.Text.Contains("class ", StringComparison.Ordinal)
+                || chunk.Text.Contains("record ", StringComparison.Ordinal)
+                || chunk.Text.Contains("interface ", StringComparison.Ordinal)
+                || chunk.Text.Contains("namespace ", StringComparison.Ordinal))
+            {
+                boost += 0.12f;
+            }
+
+            if (normalizedFile.EndsWith("program.cs", StringComparison.Ordinal)
+                || normalizedFile.Contains("core/", StringComparison.Ordinal)
+                || normalizedFile.Contains("runtime/", StringComparison.Ordinal)
+                || normalizedFile.Contains("planning/", StringComparison.Ordinal)
+                || normalizedFile.Contains("prompts/", StringComparison.Ordinal)
+                || normalizedFile.Contains("tools/", StringComparison.Ordinal)
+                || normalizedFile.Contains("slash/", StringComparison.Ordinal)
+                || normalizedFile.Contains("lsp/", StringComparison.Ordinal))
+            {
+                boost += 0.06f;
+            }
+        }
+
+        if (IsLowSignalIndexedPath(normalizedFile))
+        {
+            boost -= 0.2f;
+        }
+
+        return boost;
+    }
+
+    private static bool IsLowSignalIndexedPath(string path)
+    {
+        var normalized = path.Replace('\\', '/').ToLowerInvariant();
+        return normalized.StartsWith(".vscode/", StringComparison.Ordinal)
+            || normalized.StartsWith("properties/", StringComparison.Ordinal)
+            || normalized.EndsWith("launchsettings.json", StringComparison.Ordinal)
+            || normalized.EndsWith("launch.json", StringComparison.Ordinal)
+            || normalized.EndsWith("settings.json", StringComparison.Ordinal)
+            || normalized.EndsWith("extensions.json", StringComparison.Ordinal);
     }
     private static float Cosine(float[] a, float[] b)
     {

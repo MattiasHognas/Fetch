@@ -28,13 +28,22 @@ public sealed class IgnoreRules
             }
         }
     }
-    public bool IsIgnored(string path) => !_matcher.Match(path.Replace('\\', '/').TrimStart('.', '/')).HasMatches;
+    public bool IsIgnored(string path)
+    {
+        var normalized = path.Replace('\\', '/').Trim();
+        normalized = normalized.StartsWith("./", StringComparison.Ordinal)
+            ? normalized[2..]
+            : normalized.TrimStart('/');
+        return !_matcher.Match(normalized).HasMatches;
+    }
     private void AddIgnore(string pattern)
     {
         pattern = pattern.Replace('\\', '/').Trim().TrimStart('/');
         if (pattern.EndsWith('/'))
         {
-            _ = _matcher.AddExclude(pattern + "**");
+            var directory = pattern.TrimEnd('/');
+            _ = _matcher.AddExclude(directory);
+            _ = _matcher.AddExclude(directory + "/**");
         }
         else
         {

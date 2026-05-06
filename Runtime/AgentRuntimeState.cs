@@ -4,6 +4,10 @@ public sealed record ApprovalRequest(string Tool, string Input, string? Preview)
 
 public sealed class AgentRuntimeState
 {
+    public bool SemanticSearchReady
+    {
+        get; set;
+    }
     public Func<ApprovalRequest, Task<bool>>? ApprovalPromptAsync
     {
         get; set;

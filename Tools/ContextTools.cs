@@ -44,19 +44,19 @@ public sealed class ContextPackTool(FileReadRegistry registry, PathSandbox sandb
     private static string AddLineNumbers(string text) => string.Join("\n", text.Replace("\r\n", "\n").Split('\n').Select((line, i) => $"{i + 1,4}: {line}"));
 }
 
-public sealed record FileRangeRequest(string File, int Start, int End);
+public sealed record FileRangeRequest(string File, int? Start, int? End);
 
 public sealed class FileRangeContextTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets) : ITool
 {
     private readonly FileReadRegistry _registry = registry; private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets;
 
-    public string Name => "read_ranges"; public string Description => "Read specific line ranges. Input JSON: [{file,start,end}]"; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "read_ranges"; public string Description => "Read specific line ranges. Input JSON: [{file,start,end}] or {file,start,end}."; public ApprovalMode Approval => ApprovalMode.Auto;
     public async Task<string> RunAsync(string input)
     {
         List<FileRangeRequest>? ranges;
         try
         {
-            ranges = JsonSerializer.Deserialize<List<FileRangeRequest>>(input, AgentConfig.JsonOptions());
+            ranges = ParseRanges(input);
         }
         catch (Exception ex) { return $"Invalid range JSON: {ex.Message}"; }
         if (ranges is null || ranges.Count == 0)
@@ -77,12 +77,35 @@ public sealed class FileRangeContextTool(FileReadRegistry registry, PathSandbox 
             var content = await File.ReadAllTextAsync(path);
             _registry.MarkRead(path, content);
             var lines = content.Replace("\r\n", "\n").Split('\n');
-            var start = Math.Clamp(r.Start, 1, lines.Length);
-            var end = Math.Clamp(r.End, start, lines.Length);
+            var requestedStart = r.Start ?? 1;
+            var requestedEnd = r.End ?? Math.Min(lines.Length, requestedStart + 199);
+            var start = Math.Clamp(requestedStart, 1, lines.Length);
+            var end = Math.Clamp(requestedEnd, start, lines.Length);
             IEnumerable<string> selected = lines.Skip(start - 1).Take(end - start + 1).Select((line, i) => $"{start + i,4}: {line}");
             chunks.Add($"## {r.File}:{start}-{end}\n```text\n{string.Join("\n", selected)}\n```");
         }
         return string.Join("\n\n", chunks);
+    }
+
+    private static List<FileRangeRequest>? ParseRanges(string input)
+    {
+        using var doc = JsonDocument.Parse(input);
+        return doc.RootElement.ValueKind switch
+        {
+            JsonValueKind.Array => JsonSerializer.Deserialize<List<FileRangeRequest>>(doc.RootElement.GetRawText(), AgentConfig.JsonOptions()),
+            JsonValueKind.Object =>
+            [
+                JsonSerializer.Deserialize<FileRangeRequest>(doc.RootElement.GetRawText(), AgentConfig.JsonOptions())
+                ?? throw new InvalidOperationException("Range object could not be parsed.")
+            ],
+            JsonValueKind.Undefined => throw new NotImplementedException(),
+            JsonValueKind.String => throw new NotImplementedException(),
+            JsonValueKind.Number => throw new NotImplementedException(),
+            JsonValueKind.True => throw new NotImplementedException(),
+            JsonValueKind.False => throw new NotImplementedException(),
+            JsonValueKind.Null => throw new NotImplementedException(),
+            _ => throw new InvalidOperationException("Expected a JSON object or array of range objects.")
+        };
     }
 }
 

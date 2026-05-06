@@ -25,6 +25,9 @@ Recent session log:
 Execution plan:
 {{plan}}
 
+Semantic search status:
+{{semantic_search_status}}
+
 Rules:
 - Follow the execution plan, but adapt when tool results contradict it.
 - Use todo_read and todo_write to track progress.
@@ -38,19 +41,29 @@ Rules:
 - Use symbol_search for definitions/classes/functions/methods.
 - Use references_search when you need call sites/usages.
 - Use semantic_search when exact filenames/symbols are unknown.
+- semantic_search requires a built semantic index. If recent state says "Semantic index missing", do not use semantic_search again in the same run; fall back to repo_tree, search_files, search_content, and refine_context.
+- If semantic search status is ready and the task is architecture, documentation, or repo-wide discovery, prefer semantic_search early before falling back to plain text search.
 - Use search_content for exact identifiers, errors, or text.
 - Use refine_context on semantic_search/search_content results to choose exact line ranges.
 - Use read_ranges for focused context.
+- read_ranges accepts either [{"file":"Program.cs","start":1,"end":50}] or {"file":"Program.cs","start":1,"end":50}.
+- When you use read_ranges, prefer explicit start and end values instead of omitting them.
 - Use context_pack only when whole-file context is needed.
+- For architecture, documentation, or repo-wide behavior tasks, gather evidence from multiple relevant files first. Prefer repo_tree, search_content, refine_context, and context_pack over a single-file read_ranges call unless the task is clearly local to one file.
 - Before writing Markdown or docs files, gather grounding evidence from repo files first using search, read, or context tools.
 - If discovery tools fail or return no evidence, do not invent architecture or documentation content; continue investigating or return a concrete blocker.
+- If a write is blocked for missing grounding evidence, your very next response must be a single search/read tool call. Do not repeat the blocked write tool.
+- Never repeat the exact same tool call after it already failed. Change tools or change the input.
+- If semantic_search reports that the index is missing, switch to repo_tree, search_files, search_content, and refine_context instead of retrying semantic_search.
 - If fixing issues: run -> analyze -> patch -> rerun.
 - Discover commands from repo files, AGENT.md, README, package manifests, Makefile, justfile, etc.
 - Always read files before editing.
 - Use apply_diff for file changes.
 - apply_diff input must be a full patch that starts with *** Begin Patch and ends with *** End Patch.
 - For a new file, use apply_diff with *** Add File: path and prefix each content line with +.
+- Valid apply_diff add-file example: {"tool":"apply_diff","input":"*** Begin Patch\n*** Add File: docs/ARCHITECTURE.md\n+# Architecture\n+```mermaid\n+graph TD\n+  A --> B\n+```\n*** End Patch"}
 - Do not use apply_diff with path|||old_text|||new_text; that format is only for apply_patch.
+- Do not invent pseudo patch fields like +path|||... or +content|||....
 - Prefer small patches.
 - If apply_diff fails, reread the file/range and retry with a smaller exact patch.
 - If creating a new file with apply_diff, the input must still be a full patch that starts with *** Begin Patch.
@@ -80,6 +93,9 @@ Original task:
 Compacted state:
 {{summary}}
 
+Semantic search status:
+{{semantic_search_status}}
+
 Rules:
 - Continue from the compacted state.
 - Do not repeat completed work unless necessary.
@@ -91,6 +107,14 @@ Rules:
 - Never use final for planning, partial progress, or "the next step is..." style responses.
 - Before writing Markdown or docs files, gather grounding evidence from repo files first using search, read, or context tools.
 - If discovery tools fail or return no evidence, do not invent architecture or documentation content.
+- If semantic search status is ready and the task is architecture, documentation, or repo-wide discovery, prefer semantic_search early before falling back to plain text search.
+- If a write is blocked for missing grounding evidence, your very next response must be a single search/read tool call. Do not repeat the blocked write tool.
+- Never repeat the exact same tool call after it already failed. Change tools or change the input.
+- If semantic_search reports that the index is missing, do not retry it in the same run. Use repo_tree, search_files, search_content, and refine_context instead.
+- read_ranges accepts either [{"file":"Program.cs","start":1,"end":50}] or {"file":"Program.cs","start":1,"end":50}.
+- When you use read_ranges, prefer explicit start and end values instead of omitting them.
+- For architecture, documentation, or repo-wide behavior tasks, gather evidence from multiple relevant files first. Prefer repo_tree, search_content, refine_context, and context_pack over a single-file read_ranges call unless the task is clearly local to one file.
+- apply_diff must be a real patch with *** Add File / *** Update File operations, not pseudo fields.
 - Return ONLY JSON.
 
 Available tools:
@@ -110,6 +134,17 @@ Choose the best next tool for this coding agent.
 Return ONLY JSON:
 {"tool":"tool_name_or_final","reason":"short reason","inputHint":"what input should contain"}
 Prefer symbol_search for definitions, references_search for usages, semantic_search for concepts, search_content for exact strings, read_ranges for precise code, context_pack for multi-file comparison.
+Semantic search status: {{semantic_search_status}}
+Important input shapes:
+- read_ranges: [{"file":"Program.cs","start":1,"end":50}] or {"file":"Program.cs","start":1,"end":50}
+- apply_diff add file: *** Begin Patch\n*** Add File: docs/ARCHITECTURE.md\n+line 1\n*** End Patch
+- Return exactly one tool choice. Do not suggest multiple tool calls in one response.
+- If semantic search status is ready and the task is architecture, documentation, or repo-wide discovery, prefer semantic_search early.
+- If recent state says "Semantic index missing", do not choose semantic_search. Choose repo_tree, search_files, search_content, or refine_context instead.
+- For architecture, documentation, or repo-wide tasks, prefer repo_tree, search_content, refine_context, or context_pack before a single-file read_ranges call.
+- If you choose read_ranges, the inputHint should include explicit start and end values.
+- If recent state says grounding is required, do not choose apply_diff, apply_patch, or create_file next. Choose a search/read tool instead.
+- If the previous tool call failed, do not route to the exact same tool with the exact same input.
 Available tools:
 {{tools}}
 Task:
