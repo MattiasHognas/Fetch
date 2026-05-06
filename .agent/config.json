@@ -1,0 +1,133 @@
+{
+  "ConfigPath": "/home/mattias/Documents/source/Fetch/.agent/config.json",
+  "ModelBaseUrl": "http://localhost:11434",
+  "ModelName": "deepseek-coder-v2:16b",
+  "ContextWindowTokens": 16384,
+  "ContextWindowReserveTokens": 2048,
+  "EmbeddingBaseUrl": "http://localhost:11434",
+  "EmbeddingModel": "nomic-embed-text",
+  "ApprovalMode": "ask",
+  "MaxAgentSteps": 16,
+  "MaxFailedCommandAttempts": 4,
+  "DefaultCommandTimeoutSeconds": 60,
+  "MaxCommandTimeoutSeconds": 600,
+  "MaxToolResultChars": 12000,
+  "MaxContextPackFiles": 8,
+  "MaxContextPackTotalChars": 40000,
+  "MaxContextPackFileChars": 10000,
+  "ChunkMaxChars": 2500,
+  "ChunkOverlapChars": 300,
+  "SemanticSearchTopK": 8,
+  "SessionRoot": ".agent/sessions",
+  "BackupRoot": ".agent/backups",
+  "IndexRoot": ".agent/index",
+  "PromptRoot": ".agent/prompts",
+  "AgentInstructionFiles": [
+    "AGENT.md",
+    "AGENTS.md",
+    "AGENT.local.md"
+  ],
+  "BlockedFileNames": [
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".npmrc",
+    ".pypirc",
+    "id_rsa",
+    "id_ed25519",
+    "known_hosts"
+  ],
+  "BlockedExtensions": [
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx"
+  ],
+  "AlwaysIgnoredPaths": [
+    ".git",
+    ".vs",
+    ".agent",
+    "bin",
+    "obj",
+    "node_modules"
+  ],
+  "BlockedCommandTokens": [
+    "\u0026\u0026",
+    "||",
+    ";",
+    "|",
+    "\u003E",
+    "\u003C",
+    "\u0060",
+    "$("
+  ],
+  "BlockedCommandPrefixes": [
+    "rm ",
+    "rmdir ",
+    "del ",
+    "git push",
+    "sudo ",
+    "chmod ",
+    "chown ",
+    "curl ",
+    "wget ",
+    "ssh ",
+    "scp ",
+    "env",
+    "printenv"
+  ],
+  "PromptOverrides": {},
+  "Lsp": {
+    "Enabled": true,
+    "FallbackToTextSearch": true,
+    "StartupTimeoutSeconds": 10,
+    "RequestTimeoutSeconds": 20,
+    "Servers": [
+      {
+        "Id": "go",
+        "Language": "go",
+        "Command": "gopls",
+        "Args": [],
+        "FileExtensions": [
+          ".go"
+        ],
+        "RootMarkers": [
+          "go.mod"
+        ],
+        "Enabled": true
+      },
+      {
+        "Id": "rust",
+        "Language": "rust",
+        "Command": "rust-analyzer",
+        "Args": [],
+        "FileExtensions": [
+          ".rs"
+        ],
+        "RootMarkers": [
+          "Cargo.toml"
+        ],
+        "Enabled": true
+      },
+      {
+        "Id": "typescript",
+        "Language": "typescript",
+        "Command": "typescript-language-server",
+        "Args": [
+          "--stdio"
+        ],
+        "FileExtensions": [
+          ".ts",
+          ".tsx",
+          ".js",
+          ".jsx"
+        ],
+        "RootMarkers": [
+          "package.json",
+          "tsconfig.json"
+        ],
+        "Enabled": true
+      }
+    ]
+  }
+}
