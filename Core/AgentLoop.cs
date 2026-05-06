@@ -60,7 +60,7 @@ public sealed class AgentLoop
             });
             if (!JsonHelper.TryParseObject(response, out JsonDocument? doc, out var cleaned) || doc is null)
             {
-                transcript += "\nReturn ONLY one valid JSON object.";
+                transcript += "\nReturn ONLY one valid JSON object with no prose, no fenced code block, and no tool-call markup.";
                 await _logger.LogAsync("error", new
                 {
                     step,
@@ -116,6 +116,7 @@ public sealed class AgentLoop
                     tool = toolName,
                     result = TrimToolResult(result)
                 });
+                var recoveryGuidance = BuildRecoveryGuidance(toolName, result);
                 string? analysis = null;
                 if (toolName == "run_command")
                 {
@@ -138,10 +139,28 @@ public sealed class AgentLoop
                         failedRuns = 0;
                     }
                 }
-                transcript += $"\n\nAssistant tool call:\n{cleaned}\n\nTool result:\n{TrimToolResult(result)}\n" + (analysis is null ? "" : $"\nCommand analysis:\n{analysis}\n");
+                transcript += $"\n\nAssistant tool call:\n{cleaned}\n\nTool result:\n{TrimToolResult(result)}\n"
+                    + (analysis is null ? "" : $"\nCommand analysis:\n{analysis}\n")
+                    + (recoveryGuidance is null ? "" : $"\nRecovery guidance:\n{recoveryGuidance}\n");
             }
         }
         Console.WriteLine("Stopped after max steps.");
+    }
+
+    private static string? BuildRecoveryGuidance(string toolName, string result)
+    {
+        return toolName switch
+        {
+            "apply_diff" when result.StartsWith("Patch failed.", StringComparison.OrdinalIgnoreCase)
+                => "Do not return final yet. Read the relevant file or confirm it does not exist, then retry apply_diff with a full patch beginning with *** Begin Patch.",
+            "apply_patch" when result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
+                || result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
+                || result.StartsWith("Old text not found.", StringComparison.OrdinalIgnoreCase)
+                => "Do not return final yet. Read the current file contents again and retry apply_patch with exact current text.",
+            "read_file" when result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
+                => "If the file does not exist yet, create it with apply_diff using a full add-file patch instead of returning final.",
+            _ => null
+        };
     }
 
     private static string ReadJsonValue(JsonElement value)

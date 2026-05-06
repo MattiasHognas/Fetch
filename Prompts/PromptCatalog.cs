@@ -43,6 +43,9 @@ Rules:
 - Use apply_diff for file changes.
 - Prefer small patches.
 - If apply_diff fails, reread the file/range and retry with a smaller exact patch.
+- If creating a new file with apply_diff, the input must still be a full patch that starts with *** Begin Patch.
+- If a tool call fails, do not return final until you either recover with another tool call or can name the exact blocker.
+- Do not answer with tool-call markup, fenced JSON, prose around JSON, or multiple JSON objects.
 - After edits, run git diff.
 - After code changes, run relevant tests/builds.
 - Return ONLY JSON:

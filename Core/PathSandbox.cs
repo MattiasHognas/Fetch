@@ -2,6 +2,8 @@ namespace Fetch.Core;
 
 public sealed class PathSandbox(string root)
 {
+    private readonly string _normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
     public string Root
     {
         get;
@@ -17,7 +19,8 @@ public sealed class PathSandbox(string root)
         }
 
         var full = Path.GetFullPath(Path.Combine(Root, path));
-        return !full.StartsWith(Root, StringComparison.OrdinalIgnoreCase)
+        var normalizedFull = full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return normalizedFull != _normalizedRoot && !normalizedFull.StartsWith(Root, StringComparison.OrdinalIgnoreCase)
             ? throw new InvalidOperationException($"Path escapes repo root: {path}")
             : full;
     }

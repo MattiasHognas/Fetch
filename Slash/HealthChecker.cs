@@ -8,11 +8,12 @@ public sealed class HealthChecker(AgentConfig config, PathSandbox sandbox)
 
     public async Task<string> CheckAsync()
     {
-        var lines = new List<string> { "Health Check", "", CheckPath("Repo root", _sandbox.Root), CheckPath("Config", _config.ConfigPath), CheckDirectory("Sessions", _config.SessionRoot), CheckDirectory("Index", _config.IndexRoot), CheckCommand("rg", "ripgrep"), await CheckOllamaAsync("Ollama", _config.ModelBaseUrl), await CheckEmbeddingAsync(), CheckLspServers() };
+        var lines = new List<string> { "Health Check", "", CheckPath("Repo root", _sandbox.Root), CheckPath("Config", _config.ConfigPath), CheckDirectory("Sessions", _config.SessionRoot), CheckIndexDirectory(_config.IndexRoot), CheckCommand("rg", "ripgrep"), await CheckOllamaAsync("Ollama", _config.ModelBaseUrl), await CheckEmbeddingAsync(), CheckLspServers() };
         return string.Join(Environment.NewLine, lines);
     }
     private static string CheckPath(string label, string path) => File.Exists(path) || Directory.Exists(path) ? $"OK    {label}: {path}" : $"WARN  {label}: not found ({path})";
     private static string CheckDirectory(string label, string path) => Directory.Exists(path) ? $"OK    {label}: {path}" : $"WARN  {label}: not found ({path})";
+    private static string CheckIndexDirectory(string path) => Directory.Exists(path) ? $"OK    Index: {path}" : $"INFO  Index: not built yet ({path})";
     private static string CheckCommand(string command, string label) => CommandExists(command) ? $"OK    {label}: {command}" : $"WARN  {label}: {command} not found";
     private static async Task<string> CheckOllamaAsync(string label, string baseUrl)
     {

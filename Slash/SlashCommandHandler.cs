@@ -131,7 +131,13 @@ public sealed class SlashCommandHandler(AgentSession session, TodoStore todoStor
             Console.WriteLine("run_command unavailable.");
             return;
         }
-        Console.WriteLine(await tool.RunAsync($"{{\"command\":\"{command}\",\"cwd\":\".\",\"timeoutSeconds\":60}}"));
+
+        var input = $"{{\"command\":\"{command}\",\"cwd\":\".\",\"timeoutSeconds\":60}}";
+        var result = await ExecuteApprovedShellCommandAsync(tool, input, "Command denied by approval policy.", "Command cancelled.");
+        if (result is not null)
+        {
+            Console.WriteLine(result);
+        }
     }
     private static void PrintTail(string path, int lines = 20)
     {
@@ -222,29 +228,41 @@ public sealed class SlashCommandHandler(AgentSession session, TodoStore todoStor
         }
         Console.WriteLine("Replaying last command:");
         Console.WriteLine(_state.LastCommand.Input);
+        var result = await ExecuteApprovedShellCommandAsync(tool, _state.LastCommand.Input, "Replay denied by approval policy.", "Replay cancelled.");
+        if (result is not null)
+        {
+            Console.WriteLine(result);
+        }
+    }
+
+    private async Task<string?> ExecuteApprovedShellCommandAsync(ITool tool, string input, string deniedMessage, string cancelledMessage)
+    {
         ApprovalDecision decision = _approvalPolicy.Decide(tool);
         if (decision == ApprovalDecision.Deny)
         {
-            Console.WriteLine("Replay denied by approval policy.");
-            return;
+            Console.WriteLine(deniedMessage);
+            return null;
         }
         if (decision == ApprovalDecision.DryRun)
         {
             Console.WriteLine("Dry-run: command not executed.");
-            return;
+            return null;
         }
         if (decision == ApprovalDecision.Ask)
         {
+            Console.WriteLine("Approve run_command?");
+            Console.WriteLine("Input:");
+            Console.WriteLine(input);
             Console.Write("[y/N] ");
             if (!string.Equals(Console.ReadLine(), "y", StringComparison.OrdinalIgnoreCase))
             {
-                Console.WriteLine("Replay cancelled.");
-                return;
+                Console.WriteLine(cancelledMessage);
+                return null;
             }
         }
-        var result = await tool.RunAsync(_state.LastCommand.Input);
+        var result = await tool.RunAsync(input);
         var err = result.Contains("failed", StringComparison.OrdinalIgnoreCase) || result.Contains("\"ExitCode\": 1") || result.Contains("\"ExitCode\": -1");
-        var ex = new ToolExecution("run_command", _state.LastCommand.Input, result, err);
+        var ex = new ToolExecution("run_command", input, result, err);
         _state.LastTool = ex;
         _state.LastCommand = ex;
         if (err)
@@ -252,6 +270,6 @@ public sealed class SlashCommandHandler(AgentSession session, TodoStore todoStor
             _state.LastError = ex;
         }
 
-        Console.WriteLine(result);
+        return result;
     }
 }
