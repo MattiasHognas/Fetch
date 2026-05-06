@@ -10,6 +10,7 @@ public sealed class TuiApp(AgentLoop agent, AgentEventStore events, AgentRuntime
     public void Run()
     {
         Application.Init();
+        _state.ApprovalPromptAsync = PromptForApprovalAsync;
         Toplevel top = Application.Top;
         var win = new Window("Fetch") { X = 0, Y = 1, Width = Dim.Fill(), Height = Dim.Fill() };
         var menu = new MenuBar([new MenuBarItem("_Agent", [new MenuItem("_Replay last command", "", async () => await ReplayLastCommandAsync()), new MenuItem("_Quit", "", () => Application.RequestStop())])]);
@@ -26,6 +27,7 @@ public sealed class TuiApp(AgentLoop agent, AgentEventStore events, AgentRuntime
         top.Add(menu, win);
         UpdateTimeline();
         Application.Run();
+        _state.ApprovalPromptAsync = null;
         Application.Shutdown();
     }
     private async Task SubmitPromptAsync()
@@ -88,6 +90,33 @@ public sealed class TuiApp(AgentLoop agent, AgentEventStore events, AgentRuntime
         _events.Add(AgentEventType.ToolCall, "Replay command", _state.LastCommand.Input, "run_command", _state.LastCommand.Input);
         var result = await tool.RunAsync(_state.LastCommand.Input);
         _events.Add(AgentEventType.ToolResult, "Replay result", result, "run_command", _state.LastCommand.Input);
+    }
+    private Task<bool> PromptForApprovalAsync(ApprovalRequest request)
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Application.MainLoop.Invoke(() =>
+        {
+            var body = BuildApprovalMessage(request);
+            var choice = MessageBox.Query($"Approve {request.Tool}", body, "Approve", "Deny");
+            _ = tcs.TrySetResult(choice == 0);
+        });
+        return tcs.Task;
+    }
+    private static string BuildApprovalMessage(ApprovalRequest request)
+    {
+        var parts = new List<string> { $"Tool: {request.Tool}", "", "Input:", TrimForDialog(request.Input) };
+        if (!string.IsNullOrWhiteSpace(request.Preview))
+        {
+            parts.Add("");
+            parts.Add("Preview:");
+            parts.Add(TrimForDialog(request.Preview));
+        }
+        return string.Join("\n", parts);
+    }
+    private static string TrimForDialog(string text)
+    {
+        const int maxChars = 1200;
+        return text.Length <= maxChars ? text : text[..maxChars] + "\n[truncated]";
     }
     private static string ShortType(AgentEventType type) => type switch { AgentEventType.UserInput => "USER", AgentEventType.LlmResponse => "LLM ", AgentEventType.ToolCall => "CALL", AgentEventType.ToolResult => "DONE", AgentEventType.Error => "ERR ", AgentEventType.Final => "FIN ", _ => "EVT " };
 

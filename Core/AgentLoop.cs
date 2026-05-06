@@ -74,7 +74,7 @@ public sealed class AgentLoop
                 JsonElement root = doc.RootElement;
                 if (root.TryGetProperty("final", out JsonElement final))
                 {
-                    var text = final.GetString() ?? "";
+                    var text = ReadJsonValue(final);
                     _events.Add(AgentEventType.Final, "Final", text);
                     await _logger.LogAsync("final", new
                     {
@@ -88,8 +88,8 @@ public sealed class AgentLoop
                     transcript += "\nReturn either {\"tool\":\"name\",\"input\":\"value\"} or {\"final\":\"answer\"}.";
                     continue;
                 }
-                var toolName = t.GetString() ?? "";
-                var input = inp.GetString() ?? "";
+                var toolName = t.ValueKind == JsonValueKind.String ? t.GetString() ?? "" : "";
+                var input = ReadJsonValue(inp);
                 if (!_tools.TryGetValue(toolName, out ITool? tool))
                 {
                     transcript += $"\nUnknown tool: {toolName}\nAvailable tools:\n{RenderTools()}";
@@ -144,6 +144,22 @@ public sealed class AgentLoop
         Console.WriteLine("Stopped after max steps.");
     }
 
+    private static string ReadJsonValue(JsonElement value)
+    {
+        return value.ValueKind switch
+        {
+            JsonValueKind.Undefined => "",
+            JsonValueKind.Object => value.GetRawText(),
+            JsonValueKind.Array => value.GetRawText(),
+            JsonValueKind.String => value.GetString() ?? "",
+            JsonValueKind.Number => value.GetRawText(),
+            JsonValueKind.True => value.GetRawText(),
+            JsonValueKind.False => value.GetRawText(),
+            JsonValueKind.Null => "",
+            _ => value.GetRawText()
+        };
+    }
+
     private async Task<string> CompactTranscriptIfNeededAsync(string task, string transcript)
     {
         var maxPromptTokens = Math.Max(1, _config.ContextWindowTokens - _config.ContextWindowReserveTokens);
@@ -181,26 +197,37 @@ public sealed class AgentLoop
 
         if (decision == ApprovalDecision.Ask)
         {
-            if (tool is IPreviewableTool p)
+            var preview = tool is IPreviewableTool p ? await p.PreviewAsync(input) : null;
+            var approved = await RequestApprovalAsync(tool.Name, input, preview);
+            if (!approved)
             {
-                Console.WriteLine("\nPreview\n-------");
-                Console.WriteLine(await p.PreviewAsync(input));
-            }
-            Console.WriteLine($"Approve tool {tool.Name}?\nInput:\n{input}\n[y/N] ");
-            var answer = Console.ReadLine();
-            if (!string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase))
-            {
-                return Record(tool, input, "User denied action.", true);
+                return Record(tool, input, "Approval denied. Tool not executed.", true);
             }
         }
         try
         {
             Console.WriteLine($"Running: {tool.Name}");
             var result = await tool.RunAsync(input);
-            var isError = IsErrorResult(result);
+            var isError = IsErrorResult(tool, result);
             return Record(tool, input, result, isError);
         }
         catch (Exception ex) { return Record(tool, input, $"Tool failed: {ex.Message}", true); }
+    }
+    private async Task<bool> RequestApprovalAsync(string toolName, string input, string? preview)
+    {
+        if (_state.ApprovalPromptAsync is not null)
+        {
+            return await _state.ApprovalPromptAsync(new ApprovalRequest(toolName, input, preview));
+        }
+
+        if (!string.IsNullOrWhiteSpace(preview))
+        {
+            Console.WriteLine("\nPreview\n-------");
+            Console.WriteLine(preview);
+        }
+        Console.WriteLine($"Approve tool {toolName}?\nInput:\n{input}\n[y/N] ");
+        var answer = Console.ReadLine();
+        return string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase);
     }
     private string Record(ITool tool, string input, string result, bool isError)
     {
@@ -218,7 +245,31 @@ public sealed class AgentLoop
 
         return result;
     }
-    private static bool IsErrorResult(string r) => r.StartsWith("FAIL", StringComparison.OrdinalIgnoreCase) || r.Contains("failed", StringComparison.OrdinalIgnoreCase) || r.Contains("\"ExitCode\": 1") || r.Contains("\"ExitCode\": -1") || r.Contains("Denied by approval policy");
+    private static bool IsErrorResult(ITool tool, string result)
+    {
+        return tool.Name == "run_command"
+            ? result.Contains("\"ExitCode\": 1")
+                || result.Contains("\"ExitCode\": -1")
+                || result.Contains("\"TimedOut\": true", StringComparison.OrdinalIgnoreCase)
+                || result.Contains("Blocked by command policy.", StringComparison.OrdinalIgnoreCase)
+            : result.StartsWith("FAIL", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Tool failed:", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Patch failed.", StringComparison.OrdinalIgnoreCase)
+            || result.Contains("Denied by approval policy", StringComparison.OrdinalIgnoreCase)
+            || result.Contains("Approval denied.", StringComparison.OrdinalIgnoreCase) || tool.Name switch
+            {
+                "create_file" => result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("File already exists:", StringComparison.OrdinalIgnoreCase),
+                "delete_file" => result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase),
+                "rename_file" => result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("Not found:", StringComparison.OrdinalIgnoreCase),
+                "apply_patch" => result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("Old text not found.", StringComparison.OrdinalIgnoreCase),
+                "apply_diff" => result.StartsWith("Patch parse failed:", StringComparison.OrdinalIgnoreCase),
+                _ => false
+            };
+    }
     private string BuildInitialPrompt(string task, string plan) => _prompts.Render(PromptId.AgentInitial, new() { ["agent_md"] = _agentMd ?? "", ["previous_summary"] = _session.ReadSummary(), ["recent_log"] = _session.RecentLogTail(), ["plan"] = plan, ["tools"] = RenderTools(), ["task"] = task });
     private string BuildCompactedPrompt(string task, string summary) => _prompts.Render(PromptId.AgentCompacted, new() { ["agent_md"] = _agentMd ?? "", ["task"] = task, ["summary"] = summary, ["tools"] = RenderTools() });
     private string RenderTools() => string.Join("\n", _tools.Values.Select(t => $"- {t.Name}: {t.Description}"));

@@ -60,13 +60,23 @@ dotnet run -- agent "fix failing tests"
 Useful slash commands in chat mode:
 
 ```text
-/help
-/health
-/mode ask|read-only|auto-safe|dry-run|yolo
-/index
-/last-tool
-/last-error
-/last-command
-/replay
-/prompts
+/help          Show commands
+/session       Show current session
+/todos         Show todo list
+/status        Run git status
+/diff          Run git diff
+/log           Show recent session log
+/history       Show recent command history
+/compact       Compact session log into summary.md
+/health        Check Ollama, embeddings, rg, index, config, and LSP
+/mode MODE     Set approval mode: read-only|ask|auto-safe|dry-run|yolo
+/prompts       Export default prompts
+/config        Show config path
+/index         Build semantic index
+/last-tool     Show last tool execution
+/last-error    Show last failed tool execution
+/last-command  Show last shell command
+/replay        Replay last shell command
+/clear         Clear terminal
+/exit          Exit
 ```
