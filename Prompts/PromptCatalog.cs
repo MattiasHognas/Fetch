@@ -196,6 +196,11 @@ The agent loop ran out of steps before producing a final answer.
 Synthesize the best possible final answer for the user using ONLY evidence already in the transcript below.
 Return ONLY plain text. Be honest if work is incomplete.
 
+Rules:
+- If the transcript shows failed or blocked write attempts, do NOT draft or print the target document content.
+- If the target file was not actually written, report the blocker and the most likely next recovery step instead of inventing the file.
+- Keep the answer short and concrete.
+
 Task:
 {{task}}
 

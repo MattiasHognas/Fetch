@@ -258,6 +258,10 @@ public sealed class AgentLoop
             var text = string.IsNullOrWhiteSpace(synthesized)
                 ? $"Stopped after {_config.MaxAgentSteps} steps without producing a final answer."
                 : synthesized.Trim();
+            if (ShouldSuppressDraftFinal(plan.Kind, transcript, text))
+            {
+                text = "Stopped after the step budget. The agent gathered repo context but never completed the write: apply_diff was repeatedly called with incorrectly wrapped input instead of a raw patch. The next run should retry apply_diff with a real *** Begin Patch payload and then request approval.";
+            }
             _events.Add(AgentEventType.Final, "Final", text);
             await _logger.LogAsync("final", new
             {
@@ -277,6 +281,29 @@ public sealed class AgentLoop
             });
             Console.WriteLine(text);
         }
+    }
+
+    private static bool ShouldSuppressDraftFinal(TaskKind kind, string transcript, string synthesized)
+    {
+        if (kind is not (TaskKind.ArchitectureDocs or TaskKind.Documentation))
+        {
+            return false;
+        }
+
+        if (!transcript.Contains("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
+            && !transcript.Contains("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (transcript.Contains("Patch applied successfully.", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return synthesized.Contains("# Architecture", StringComparison.OrdinalIgnoreCase)
+            || synthesized.Contains("## ", StringComparison.Ordinal)
+            || synthesized.Contains("```mermaid", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? BuildRecoveryGuidance(string toolName, string result)

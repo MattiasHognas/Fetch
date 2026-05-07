@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Fetch.Tools;
 
 public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets, AgentConfig config) : ITool, IPreviewableTool
@@ -5,13 +7,13 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
     private readonly FileReadRegistry _registry = registry; private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets; private readonly AgentConfig _config = config;
 
     public string Name => "apply_diff";
-    public string Description => "Apply an agent patch using *** Begin Patch format. Supports Add File, Update File, Delete File.";
+    public string Description => "Apply an agent patch using *** Begin Patch format. Supports Add File, Update File, Delete File. Input may be the raw patch string or JSON like {\"patch\":\"*** Begin Patch...\"}.";
     public ApprovalMode Approval => ApprovalMode.Ask;
     public async Task<string> PreviewAsync(string input)
     {
         try
         {
-            List<PatchOperation> ops = PatchParser.Parse(input);
+            List<PatchOperation> ops = PatchParser.Parse(ExtractPatchInput(input));
             (var Success, var Message) = await DryRunAsync(ops);
             return Success ? Message : $"Patch validation failed:\n{Message}";
         }
@@ -22,7 +24,7 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
         List<PatchOperation> ops;
         try
         {
-            ops = PatchParser.Parse(input);
+            ops = PatchParser.Parse(ExtractPatchInput(input));
         }
         catch (Exception ex) { return Failure("patch_parse_failed", ex.Message); }
         (var Success, var Message) = await DryRunAsync(ops);
@@ -42,6 +44,37 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
         }
         catch (Exception ex) { return Failure("patch_apply_failed", ex.Message); }
     }
+
+    private static string ExtractPatchInput(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return input;
+        }
+
+        var trimmed = input.Trim();
+        if (trimmed.StartsWith("*** Begin Patch", StringComparison.Ordinal))
+        {
+            return input;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(input);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("patch", out JsonElement patch)
+                && patch.ValueKind == JsonValueKind.String)
+            {
+                return patch.GetString() ?? "";
+            }
+        }
+        catch
+        {
+        }
+
+        return input;
+    }
+
     private async Task<(bool Success, string Message)> DryRunAsync(List<PatchOperation> ops)
     {
         var msgs = new List<string>();
