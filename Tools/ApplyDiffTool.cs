@@ -14,6 +14,10 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
         try
         {
             List<PatchOperation> ops = PatchParser.Parse(ExtractPatchInput(input));
+            if (ops.Count == 0)
+            {
+                return "Patch parse failed: No patch operations were found. Use *** Add File, *** Update File, or *** Delete File inside the patch.";
+            }
             (var Success, var Message) = await DryRunAsync(ops);
             return Success ? Message : $"Patch validation failed:\n{Message}";
         }
@@ -25,6 +29,10 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
         try
         {
             ops = PatchParser.Parse(ExtractPatchInput(input));
+            if (ops.Count == 0)
+            {
+                return Failure("patch_parse_failed", "No patch operations were found. Use *** Add File, *** Update File, or *** Delete File inside the patch.");
+            }
         }
         catch (Exception ex) { return Failure("patch_parse_failed", ex.Message); }
         (var Success, var Message) = await DryRunAsync(ops);
@@ -55,7 +63,7 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
         var trimmed = input.Trim();
         if (trimmed.StartsWith("*** Begin Patch", StringComparison.Ordinal))
         {
-            return input;
+            return NormalizePatchDialect(input);
         }
 
         try
@@ -65,14 +73,134 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
                 && doc.RootElement.TryGetProperty("patch", out JsonElement patch)
                 && patch.ValueKind == JsonValueKind.String)
             {
-                return patch.GetString() ?? "";
+                return NormalizePatchDialect(patch.GetString() ?? "");
             }
         }
         catch
         {
         }
 
-        return input;
+        return NormalizePatchDialect(input);
+    }
+
+    private static string NormalizePatchDialect(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return input;
+        }
+
+        var normalized = input.Replace("\r\n", "\n").Trim();
+        return TryConvertSimpleAddFilePatch(normalized, out var converted)
+            ? converted
+            : normalized.StartsWith("*** Begin Patch", StringComparison.Ordinal)
+            && !normalized.Contains("*** End Patch", StringComparison.Ordinal)
+            ? normalized + "\n*** End Patch"
+            : normalized;
+    }
+
+    private static bool TryConvertSimpleAddFilePatch(string input, out string converted)
+    {
+        converted = "";
+        List<string> lines = [.. input.Split('\n')];
+        if (lines.Count < 4 || lines[0].Trim() != "*** Begin Patch")
+        {
+            return false;
+        }
+
+        var index = 1;
+        while (index < lines.Count && string.IsNullOrWhiteSpace(lines[index]))
+        {
+            index++;
+        }
+
+        if (index >= lines.Count)
+        {
+            return false;
+        }
+
+        if (lines[index].Trim().StartsWith("+++ Add File: ", StringComparison.Ordinal))
+        {
+            var addPath = lines[index].Trim()["+++ Add File: ".Length..].Trim();
+            index++;
+            if (index < lines.Count && lines[index].TrimStart().StartsWith("@@ ", StringComparison.Ordinal))
+            {
+                index++;
+            }
+
+            var addContent = new List<string>();
+            while (index < lines.Count && lines[index].Trim() != "*** End Patch")
+            {
+                var line = lines[index];
+                addContent.Add(line.StartsWith('+') ? line : "+" + line);
+                index++;
+            }
+
+            converted = string.Join('\n', ["*** Begin Patch", $"*** Add File: {addPath}", .. addContent, "*** End Patch"]);
+            return true;
+        }
+
+        if (lines[index].Trim() == "+++")
+        {
+            index++;
+            while (index < lines.Count && string.IsNullOrWhiteSpace(lines[index]))
+            {
+                index++;
+            }
+
+            if (index >= lines.Count)
+            {
+                return false;
+            }
+
+            var addPath = lines[index].Trim();
+            index++;
+            if (index < lines.Count && lines[index].TrimStart().StartsWith("@@ ", StringComparison.Ordinal))
+            {
+                index++;
+            }
+
+            var addContent = new List<string>();
+            while (index < lines.Count && lines[index].Trim() != "*** End Patch")
+            {
+                var line = lines[index];
+                addContent.Add(line.StartsWith('+') ? line : "+" + line);
+                index++;
+            }
+
+            converted = string.Join('\n', ["*** Begin Patch", $"*** Add File: {addPath}", .. addContent, "*** End Patch"]);
+            return true;
+        }
+
+        if (lines[index].Trim() != "---")
+        {
+            return false;
+        }
+
+        index++;
+        if (index >= lines.Count || !lines[index].TrimStart().StartsWith("file: ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var path = lines[index].Trim()["file: ".Length..].Trim();
+        index++;
+        if (index >= lines.Count || lines[index].Trim() != "+++")
+        {
+            return false;
+        }
+
+        index++;
+        var content = new List<string>();
+        while (index < lines.Count && lines[index].Trim() != "*** End Patch")
+        {
+            var line = lines[index];
+            content.Add(line.StartsWith('+') ? line : "+" + line);
+            index++;
+        }
+
+        converted = string.Join('\n', ["*** Begin Patch", $"*** Add File: {path}", .. content, "*** End Patch"]);
+        return true;
     }
 
     private async Task<(bool Success, string Message)> DryRunAsync(List<PatchOperation> ops)

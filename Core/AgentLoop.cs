@@ -53,7 +53,7 @@ public sealed class AgentLoop
         {
             transcript = await CompactTranscriptIfNeededAsync(task, transcript);
             transcript += $"\n\nStep {step + 1} of {_config.MaxAgentSteps}.\n";
-            var (currentTodo, completedTodos) = await GetTodoRoutingStateAsync();
+            (var currentTodo, var completedTodos) = await GetTodoRoutingStateAsync();
             var route = await _router.ChooseAsync(task, transcript, _tools.Values, _state.SemanticSearchReady, plan, currentTodo, completedTodos);
             await _logger.LogAsync("tool_route", new
             {
@@ -130,6 +130,19 @@ public sealed class AgentLoop
                     continue;
                 }
 
+                if (TryEnforceCurrentTodoTool(currentTodo, toolName, out var currentTodoNudge))
+                {
+                    transcript += $"\n{currentTodoNudge}";
+                    await _logger.LogAsync("error", new
+                    {
+                        step,
+                        kind = "current_todo_tool",
+                        currentTodo,
+                        got = toolName
+                    });
+                    continue;
+                }
+
                 if (!_tools.TryGetValue(toolName, out ITool? tool))
                 {
                     transcript += $"\nUnknown tool: {toolName}\nAvailable tools:\n{RenderTools()}";
@@ -187,6 +200,10 @@ public sealed class AgentLoop
                 if (_state.LastTool is { IsError: false })
                 {
                     await AdvanceTodoProgressAsync(toolName);
+                    if (await TryCompleteRunAsync(task, toolName, input, result))
+                    {
+                        return;
+                    }
                 }
                 var recoveryGuidance = BuildRecoveryGuidance(toolName, result);
                 string? analysis = null;
@@ -219,6 +236,62 @@ public sealed class AgentLoop
         await SynthesizeFinalAsync(task, plan, transcript);
     }
 
+    private async Task<bool> TryCompleteRunAsync(string task, string toolName, string input, string result)
+    {
+        List<TodoItem> todos = await _todoStore.ReadAsync();
+        if (todos.Count == 0 || todos.Any(t => !string.Equals(t.Status, "done", StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        var text = BuildCompletionMessage(task, toolName, input, result);
+        _events.Add(AgentEventType.Final, "Final", text);
+        await _logger.LogAsync("final", new
+        {
+            text,
+            completedByTodos = true
+        });
+        Console.WriteLine(text);
+        return true;
+    }
+
+    private static string BuildCompletionMessage(string task, string toolName, string input, string result)
+    {
+        if (toolName == "read_file")
+        {
+            var verifiedPath = TryExtractPathInput(input) ?? input.Trim();
+            return $"Completed: {task}. Verified {verifiedPath} after writing it.";
+        }
+
+        return toolName == "run_command" && result.Contains("\"ExitCode\": 0", StringComparison.Ordinal)
+            ? $"Completed: {task}. The final verification command succeeded."
+            : $"Completed: {task}.";
+    }
+
+    private static string? TryExtractPathInput(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(input);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("path", out JsonElement path)
+                && path.ValueKind == JsonValueKind.String)
+            {
+                return path.GetString();
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
     private bool TryEnforceRequiredFirstTool(int step, string toolName, PlanResult plan, out string nudge)
     {
         nudge = "";
@@ -236,6 +309,46 @@ public sealed class AgentLoop
             return false;
         }
         nudge = $"For task kind {plan.Kind}, the first tool call MUST be {required} (you chose {toolName}). Re-issue the call as {{\"tool\":\"{required}\",\"input\":\"\"}} (empty input maps the whole repo).";
+        return true;
+    }
+
+    private static bool TryEnforceCurrentTodoTool(string currentTodo, string toolName, out string nudge)
+    {
+        nudge = "";
+        if (!TryGetPinnedTodoTool(currentTodo, out var requiredTool)
+            || string.Equals(requiredTool, toolName, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        nudge = $"The active todo is '{currentTodo}', so the next tool MUST be {requiredTool} (you chose {toolName}). Do not go back to an earlier completed-step tool. Return exactly one JSON tool call for {requiredTool}.";
+        return true;
+    }
+
+    private static bool TryGetPinnedTodoTool(string currentTodo, out string toolName)
+    {
+        toolName = "";
+        if (string.IsNullOrWhiteSpace(currentTodo))
+        {
+            return false;
+        }
+
+        var open = currentTodo.LastIndexOf('(');
+        var close = currentTodo.LastIndexOf(')');
+        if (open < 0 || close <= open)
+        {
+            return false;
+        }
+
+        var marker = currentTodo[(open + 1)..close].Trim();
+        if (string.IsNullOrWhiteSpace(marker)
+            || marker.Contains(" or ", StringComparison.OrdinalIgnoreCase)
+            || marker.Contains(',', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        toolName = marker;
         return true;
     }
 
@@ -262,6 +375,10 @@ public sealed class AgentLoop
             {
                 text = "Stopped after the step budget. The agent gathered repo context but never completed the write: apply_diff was repeatedly called with incorrectly wrapped input instead of a raw patch. The next run should retry apply_diff with a real *** Begin Patch payload and then request approval.";
             }
+            // if (plan.Kind is TaskKind.ArchitectureDocs or TaskKind.Documentation && text.Contains("Patch parse failed:", StringComparison.OrdinalIgnoreCase) && !text.Contains("Patch applied successfully.", StringComparison.OrdinalIgnoreCase))
+            // {
+            //     text += "\nThe agent never produced a valid patch. The next run should include a real patch payload starting with *** Begin Patch and not use path|||content pseudo-patches.";
+            // }
             _events.Add(AgentEventType.Final, "Final", text);
             await _logger.LogAsync("final", new
             {
@@ -285,25 +402,10 @@ public sealed class AgentLoop
 
     private static bool ShouldSuppressDraftFinal(TaskKind kind, string transcript, string synthesized)
     {
-        if (kind is not (TaskKind.ArchitectureDocs or TaskKind.Documentation))
-        {
-            return false;
-        }
-
-        if (!transcript.Contains("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
-            && !transcript.Contains("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        if (transcript.Contains("Patch applied successfully.", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return synthesized.Contains("# Architecture", StringComparison.OrdinalIgnoreCase)
+        return kind is TaskKind.ArchitectureDocs or TaskKind.Documentation && (transcript.Contains("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
+            || transcript.Contains("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)) && !transcript.Contains("Patch applied successfully.", StringComparison.OrdinalIgnoreCase) && (synthesized.Contains("# Architecture", StringComparison.OrdinalIgnoreCase)
             || synthesized.Contains("## ", StringComparison.Ordinal)
-            || synthesized.Contains("```mermaid", StringComparison.OrdinalIgnoreCase);
+            || synthesized.Contains("```mermaid", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string? BuildRecoveryGuidance(string toolName, string result)

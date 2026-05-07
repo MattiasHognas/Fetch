@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Fetch.Planning;
 
 public sealed record PlanResult(TaskKind Kind, Playbook Playbook, string LlmPlanJson);
@@ -54,6 +56,17 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
 
     public Task<string> ChooseAsync(string task, string transcript, IEnumerable<ITool> tools, bool semanticSearchReady, PlanResult plan, string currentTodo, string completedTodos)
     {
+        var availableTools = tools.Select(t => t.Name).ToHashSet(StringComparer.Ordinal);
+        if (TryGetPinnedTodoTool(currentTodo, out var pinnedTool) && availableTools.Contains(pinnedTool))
+        {
+            return Task.FromResult(JsonSerializer.Serialize(new
+            {
+                tool = pinnedTool,
+                reason = "The current todo explicitly targets this tool, so routing should stay on the active playbook step instead of revisiting completed steps.",
+                inputHint = BuildPinnedToolInputHint(pinnedTool)
+            }));
+        }
+
         var p = _prompts.Render(PromptId.ToolRouter, new()
         {
             ["tools"] = string.Join("\n", tools.Select(t => $"- {t.Name}: {t.Description}")),
@@ -68,6 +81,46 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
         });
         return _llm.ChatAsync(p);
     }
+
+    private static bool TryGetPinnedTodoTool(string currentTodo, out string toolName)
+    {
+        toolName = "";
+        if (string.IsNullOrWhiteSpace(currentTodo))
+        {
+            return false;
+        }
+
+        var open = currentTodo.LastIndexOf('(');
+        var close = currentTodo.LastIndexOf(')');
+        if (open < 0 || close <= open)
+        {
+            return false;
+        }
+
+        var marker = currentTodo[(open + 1)..close].Trim();
+        if (string.IsNullOrWhiteSpace(marker)
+            || marker.Contains(" or ", StringComparison.OrdinalIgnoreCase)
+            || marker.Contains(',', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        toolName = marker;
+        return true;
+    }
+
+    private static string BuildPinnedToolInputHint(string toolName)
+    {
+        return toolName switch
+        {
+            "apply_diff" => "Provide a real *** Begin Patch payload for the target file. Do not return prose or a router suggestion.",
+            "read_file" => "Read the concrete file produced or needed by the current step.",
+            "run_command" => "Run the narrowest relevant build, test, or verification command for the changed slice.",
+            "references_search" => "Provide a concrete symbol and file context from the files already read.",
+            _ => "Provide the concrete input required by the current todo step."
+        };
+    }
+
     private static string Trim(string t) => t.Length <= 12000 ? t : t[^12000..];
 }
 

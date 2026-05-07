@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace Fetch.Tools;
 
 public sealed class ReadFileTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets) : ITool
@@ -7,7 +9,8 @@ public sealed class ReadFileTool(FileReadRegistry registry, PathSandbox sandbox,
     public string Name => "read_file"; public string Description => "Read a file by path."; public ApprovalMode Approval => ApprovalMode.Auto;
     public async Task<string> RunAsync(string input)
     {
-        var path = _sandbox.Resolve(input.Trim());
+        var rawPath = ExtractPathInput(input);
+        var path = _sandbox.Resolve(rawPath);
         _secrets.ThrowIfSensitive(path);
         if (!File.Exists(path))
         {
@@ -17,6 +20,30 @@ public sealed class ReadFileTool(FileReadRegistry registry, PathSandbox sandbox,
         var c = await File.ReadAllTextAsync(path);
         _registry.MarkRead(path, c);
         return c;
+    }
+
+    private static string ExtractPathInput(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return input.Trim();
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(input);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("path", out JsonElement path)
+                && path.ValueKind == JsonValueKind.String)
+            {
+                return path.GetString()?.Trim() ?? "";
+            }
+        }
+        catch
+        {
+        }
+
+        return input.Trim();
     }
 }
 
