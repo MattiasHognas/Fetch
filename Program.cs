@@ -101,7 +101,14 @@ chatCommand.SetHandler(async (sessionId, newSession) =>
             continue;
         }
 
-        await runtime.Agent.RunAsync(input);
+        try
+        {
+            await runtime.Agent.RunAsync(input);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Agent failed: {ex.Message}");
+        }
     }
 }, sessionOption, newSessionOption);
 
@@ -149,7 +156,14 @@ agentCommand.SetHandler(async (prompt, sessionId, newSession) =>
             }, TaskScheduler.Default);
         }
     }
-    await runtime.Agent.RunAsync(task);
+    try
+    {
+        await runtime.Agent.RunAsync(task);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Agent failed: {ex.Message}");
+    }
 }, agentPrompt, sessionOption, newSessionOption);
 
 var sessionsCommand = new Command("sessions", "List sessions");

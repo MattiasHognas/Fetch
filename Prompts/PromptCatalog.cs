@@ -47,7 +47,8 @@ Hard rules:
 - If a write tool is blocked for missing grounding evidence, your next call MUST be a read/search tool (code_map, read_ranges, read_file, search_content, semantic_search, symbol_search, references_search, context_pack). Do not retry the write.
 - Never repeat the exact same tool call after it failed. Change the tool or the input.
 - If semantic_search reports the index is missing, do not call it again in this run.
-- read_ranges input: [{"file":"Program.cs","start":1,"end":50}] or {"file":"Program.cs","start":1,"end":50}.
+- read_ranges input: [{"file":"path/to/file.cs","start":1,"end":80}] or {"file":"path/to/file.cs","start":1,"end":80}.
+- Example paths are illustrative only. Use actual files discovered from code_map, search results, or prior reads; do not default to Program.cs unless it is clearly relevant.
 - apply_diff input MUST be a real patch starting with *** Begin Patch and ending with *** End Patch.
 - For a new file, use *** Add File: path and prefix each content line with +.
 - Always read concrete files before writing documentation; do not invent class names, methods, or structure.
@@ -130,7 +131,7 @@ Hard rules:
 - If a successful code_map result is in recent state, prefer read_ranges next over re-running code_map.
 
 Important input shapes:
-- read_ranges: [{"file":"Program.cs","start":1,"end":50}] or {"file":"Program.cs","start":1,"end":50}
+- read_ranges: [{"file":"path/to/file.cs","start":1,"end":80}] or {"file":"path/to/file.cs","start":1,"end":80}
 - apply_diff add file: *** Begin Patch\n*** Add File: docs/ARCHITECTURE.md\n+line 1\n*** End Patch
 - code_map: empty string for whole repo, or {"path":"Tools","include":"*.cs"} to scope.
 

@@ -27,7 +27,7 @@ public sealed class LlmClient(AgentConfig config) : IDisposable
                 _supportsTokenizeEndpoint = true;
                 return count;
             }
-            catch (Exception) when (_supportsTokenizeEndpoint is null)
+            catch (Exception)
             {
                 _supportsTokenizeEndpoint = false;
             }

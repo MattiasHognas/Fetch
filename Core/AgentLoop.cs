@@ -47,6 +47,8 @@ public sealed class AgentLoop
         var failedRuns = 0;
         var hasGroundingEvidence = false;
         var repeatedBlockedToolCalls = 0;
+        var successfulDiscoveryCalls = new HashSet<string>(StringComparer.Ordinal);
+        var failedToolCalls = new HashSet<string>(StringComparer.Ordinal);
         for (var step = 0; step < _config.MaxAgentSteps; step++)
         {
             transcript = await CompactTranscriptIfNeededAsync(task, transcript);
@@ -145,9 +147,10 @@ public sealed class AgentLoop
                     tool = toolName,
                     input
                 });
-                var result = TryBlockRepeatedDiscoveryToolCall(toolName, input, out var repeatedDiscoveryFailure)
+                var normalizedInput = NormalizeToolInput(toolName, input);
+                var result = TryBlockRepeatedDiscoveryToolCall(toolName, normalizedInput, successfulDiscoveryCalls, out var repeatedDiscoveryFailure)
                     ? Record(tool, input, repeatedDiscoveryFailure, true)
-                    : TryBlockRepeatedFailedToolCall(toolName, input, out var repeatedFailure)
+                    : TryBlockRepeatedFailedToolCall(toolName, normalizedInput, failedToolCalls, out var repeatedFailure)
                     ? Record(tool, input, repeatedFailure, true)
                     : TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
                         ? Record(tool, input, groundingFailure, true)
@@ -179,6 +182,7 @@ public sealed class AgentLoop
                     hasGroundingEvidence = true;
                     _state.GroundingEvidenceBytes += result.Length;
                 }
+                TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
                 var recoveryGuidance = BuildRecoveryGuidance(toolName, result);
                 string? analysis = null;
                 if (toolName == "run_command")
@@ -289,7 +293,9 @@ public sealed class AgentLoop
             _ when result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
                 => "Do not repeat the same discovery tool call with the same input. Refine the query, choose a more specific read/search tool, or move on to the next evidence-gathering step.",
             "read_ranges" when result.StartsWith("Invalid range JSON:", StringComparison.OrdinalIgnoreCase)
-                => "Retry read_ranges with JSON shaped like [{\"file\":\"Program.cs\",\"start\":1,\"end\":50}] or {\"file\":\"Program.cs\",\"start\":1,\"end\":50}.",
+                => "Retry read_ranges with JSON shaped like [{\"file\":\"path/to/file.cs\",\"start\":1,\"end\":80}] or {\"file\":\"path/to/file.cs\",\"start\":1,\"end\":80} using a real file from code_map or search results.",
+            "read_ranges" when result.StartsWith("Invalid input. Requested range", StringComparison.OrdinalIgnoreCase)
+                => "That read_ranges request was invalid or past EOF. Do not keep incrementing the same file blindly. Choose a valid 1-based range within that file, or switch to a different anchor file from code_map.",
             "apply_diff" when result.StartsWith("Patch validation failed:\nFile already exists:", StringComparison.OrdinalIgnoreCase)
                 => "The target file already exists. Read its current contents, then retry apply_diff with *** Update File instead of *** Add File. Do not repeat the same add-file patch.",
             "apply_diff" when result.StartsWith("Patch failed.", StringComparison.OrdinalIgnoreCase)
@@ -496,6 +502,8 @@ public sealed class AgentLoop
                 "delete_file" => result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase),
                 "rename_file" => result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
                     || result.StartsWith("Not found:", StringComparison.OrdinalIgnoreCase),
+                "read_ranges" => result.StartsWith("Invalid range JSON:", StringComparison.OrdinalIgnoreCase)
+                    || result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase),
                 "apply_patch" => result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
                     || result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
                     || result.StartsWith("Old text not found.", StringComparison.OrdinalIgnoreCase),
@@ -532,16 +540,55 @@ public sealed class AgentLoop
         return true;
     }
 
-    private bool TryBlockRepeatedFailedToolCall(string toolName, string input, out string failure)
+    private static void TrackToolCall(string toolName, string normalizedInput, string result, HashSet<string> successfulDiscoveryCalls, HashSet<string> failedToolCalls)
     {
-        failure = "";
-        ToolExecution? lastError = _state.LastError;
-        if (lastError is null || !lastError.IsError)
+        var key = MakeToolCallKey(toolName, normalizedInput);
+        if (IsDiscoveryTool(toolName) && !IsDiscoveryFailure(result) && !result.StartsWith("Repeated ", StringComparison.OrdinalIgnoreCase))
         {
-            return false;
+            _ = successfulDiscoveryCalls.Add(key);
         }
 
-        if (!string.Equals(lastError.Tool, toolName, StringComparison.Ordinal) || !string.Equals(lastError.Input, input, StringComparison.Ordinal))
+        if (result.StartsWith("Repeated ", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Invalid ", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Patch ", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Tool failed:", StringComparison.OrdinalIgnoreCase)
+            || result.Contains("Denied by approval policy", StringComparison.OrdinalIgnoreCase)
+            || result.Contains("Approval denied.", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase))
+        {
+            _ = failedToolCalls.Add(key);
+        }
+    }
+
+    private static string NormalizeToolInput(string toolName, string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return "";
+        }
+
+        if (toolName is "code_map" or "read_ranges" or "symbol_search" or "references_search" or "todo_write")
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(input);
+                return JsonSerializer.Serialize(doc.RootElement);
+            }
+            catch
+            {
+                return input.Trim();
+            }
+        }
+
+        return input.Trim();
+    }
+
+    private static string MakeToolCallKey(string toolName, string normalizedInput) => toolName + "\n" + normalizedInput;
+
+    private static bool TryBlockRepeatedFailedToolCall(string toolName, string normalizedInput, HashSet<string> failedToolCalls, out string failure)
+    {
+        failure = "";
+        if (!failedToolCalls.Contains(MakeToolCallKey(toolName, normalizedInput)))
         {
             return false;
         }
@@ -550,16 +597,15 @@ public sealed class AgentLoop
         return true;
     }
 
-    private bool TryBlockRepeatedDiscoveryToolCall(string toolName, string input, out string failure)
+    private static bool TryBlockRepeatedDiscoveryToolCall(string toolName, string normalizedInput, HashSet<string> successfulDiscoveryCalls, out string failure)
     {
         failure = "";
-        ToolExecution? lastTool = _state.LastTool;
-        if (lastTool is null || lastTool.IsError || !IsDiscoveryTool(toolName))
+        if (!IsDiscoveryTool(toolName))
         {
             return false;
         }
 
-        if (!string.Equals(lastTool.Tool, toolName, StringComparison.Ordinal) || !string.Equals(lastTool.Input, input, StringComparison.Ordinal))
+        if (!successfulDiscoveryCalls.Contains(MakeToolCallKey(toolName, normalizedInput)))
         {
             return false;
         }

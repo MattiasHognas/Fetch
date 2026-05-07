@@ -131,7 +131,20 @@ public sealed class FileRangeContextTool(FileReadRegistry registry, PathSandbox 
             var lines = content.Replace("\r\n", "\n").Split('\n');
             var requestedStart = r.Start ?? 1;
             var requestedEnd = r.End ?? Math.Min(lines.Length, requestedStart + 199);
-            var start = Math.Clamp(requestedStart, 1, lines.Length);
+
+            if (requestedStart < 1 || requestedEnd < requestedStart)
+            {
+                chunks.Add($"Invalid input. Requested range {requestedStart}-{requestedEnd} for {r.File} is invalid. Use 1-based inclusive line numbers with end >= start.");
+                continue;
+            }
+
+            if (requestedStart > lines.Length)
+            {
+                chunks.Add($"Invalid input. Requested range {requestedStart}-{requestedEnd} starts past the end of {r.File}, which has {lines.Length} line(s). Choose a valid range or a different file from code_map.");
+                continue;
+            }
+
+            var start = requestedStart;
             var end = Math.Clamp(requestedEnd, start, lines.Length);
             IEnumerable<string> selected = lines.Skip(start - 1).Take(end - start + 1).Select((line, i) => $"{start + i,4}: {line}");
             chunks.Add($"## {r.File}:{start}-{end}\n```text\n{string.Join("\n", selected)}\n```");
