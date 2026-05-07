@@ -166,6 +166,8 @@ public sealed class AgentLoop
                     ? Record(tool, input, repeatedDiscoveryFailure, true)
                     : TryBlockRepeatedFailedToolCall(toolName, normalizedInput, failedToolCalls, out var repeatedFailure)
                     ? Record(tool, input, repeatedFailure, true)
+                    : TryBlockWrongDocumentationWrite(toolName, input, _state.CurrentTaskKind, out var wrongDocsWriteFailure)
+                        ? Record(tool, input, wrongDocsWriteFailure, true)
                     : TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
                         ? Record(tool, input, groundingFailure, true)
                         : await ExecuteToolAsync(tool, input);
@@ -432,6 +434,8 @@ public sealed class AgentLoop
                 => "That read_ranges request was invalid or past EOF. Do not keep incrementing the same file blindly. Choose a valid 1-based range within that file, or switch to a different anchor file from code_map.",
             "apply_diff" when result.StartsWith("Patch validation failed:\nFile already exists:", StringComparison.OrdinalIgnoreCase)
                 => "The target file already exists. Read its current contents, then retry apply_diff with *** Update File instead of *** Add File. Do not repeat the same add-file patch.",
+            "apply_diff" when result.StartsWith("Architecture/documentation tasks must target a docs markdown file", StringComparison.OrdinalIgnoreCase)
+                => "For architecture/documentation tasks, write only docs/ARCHITECTURE.md or another docs/*.md file using a real *** Begin Patch payload. Do not modify .cs files.",
             "apply_diff" when result.StartsWith("Patch failed.", StringComparison.OrdinalIgnoreCase)
                 => "Do not return final yet. Read the relevant file or confirm it does not exist, then retry apply_diff with a full patch beginning with *** Begin Patch.",
             "apply_diff" when result.StartsWith("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
@@ -671,6 +675,32 @@ public sealed class AgentLoop
         failure = "Grounding required before writing documentation. Call code_map and at least one read tool (read_ranges, read_file, context_pack) on real repo files first; accumulated evidence must be at least "
             + minEvidenceBytes
             + " bytes. Do not retry the write yet.";
+        return true;
+    }
+
+    private static bool TryBlockWrongDocumentationWrite(string toolName, string input, TaskKind taskKind, out string failure)
+    {
+        failure = "";
+        if (taskKind is not (TaskKind.ArchitectureDocs or TaskKind.Documentation))
+        {
+            return false;
+        }
+
+        return toolName switch
+        {
+            "create_file" when TryGetCreateFilePath(input, out var createPath) && !IsDocumentationPath(createPath)
+                => FailDocumentationWrite("Architecture/documentation tasks must write a markdown file under docs/ such as docs/ARCHITECTURE.md. Do not modify source files for this step.", out failure),
+            "apply_patch" when TryGetDelimitedPath(input, out var patchPath) && !IsDocumentationPath(patchPath)
+                => FailDocumentationWrite("Architecture/documentation tasks must write a markdown file under docs/ such as docs/ARCHITECTURE.md. Do not modify source files for this step.", out failure),
+            "apply_diff" when !LooksLikeDocumentationWrite(input)
+                => FailDocumentationWrite("Architecture/documentation tasks must target a docs markdown file such as docs/ARCHITECTURE.md. Provide a real *** Begin Patch payload with *** Add File or *** Update File, and do not modify .cs files.", out failure),
+            _ => false
+        };
+    }
+
+    private static bool FailDocumentationWrite(string message, out string failure)
+    {
+        failure = message;
         return true;
     }
 

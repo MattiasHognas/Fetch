@@ -140,6 +140,30 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
             return true;
         }
 
+        if (TryNormalizeBareAddFilePath(lines[index], out var barePath))
+        {
+            index++;
+            if (index < lines.Count && lines[index].Trim() == "---")
+            {
+                index++;
+            }
+            if (index < lines.Count && lines[index].TrimStart().StartsWith("@@ ", StringComparison.Ordinal))
+            {
+                index++;
+            }
+
+            var addContent = new List<string>();
+            while (index < lines.Count && lines[index].Trim() != "*** End Patch")
+            {
+                var line = lines[index];
+                addContent.Add(line.StartsWith('+') ? line : "+" + line);
+                index++;
+            }
+
+            converted = string.Join('\n', ["*** Begin Patch", $"*** Add File: {barePath}", .. addContent, "*** End Patch"]);
+            return true;
+        }
+
         if (lines[index].Trim() == "+++")
         {
             index++;
@@ -201,6 +225,48 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
 
         converted = string.Join('\n', ["*** Begin Patch", $"*** Add File: {path}", .. content, "*** End Patch"]);
         return true;
+    }
+
+    private static bool TryNormalizeBareAddFilePath(string line, out string normalizedPath)
+    {
+        normalizedPath = "";
+        var candidate = line.Trim();
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return false;
+        }
+
+        if (candidate.StartsWith("+++ ", StringComparison.Ordinal)
+            || candidate.StartsWith("@@ ", StringComparison.Ordinal)
+            || candidate.StartsWith("*** ", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (candidate.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!Uri.TryCreate(candidate, UriKind.Absolute, out Uri? uri) || !uri.IsFile)
+            {
+                return false;
+            }
+
+            candidate = Uri.UnescapeDataString(uri.LocalPath).Replace('\\', '/');
+        }
+
+        if (candidate.StartsWith("/root/", StringComparison.OrdinalIgnoreCase))
+        {
+            candidate = candidate["/root/".Length..];
+        }
+        else if (candidate.Length > 0 && candidate[0] == '/')
+        {
+            candidate = candidate.TrimStart('/');
+        }
+
+        normalizedPath = candidate;
+        return candidate.Length > 0
+            && !candidate.Contains("*** ", StringComparison.Ordinal)
+            && !candidate.Contains("@@", StringComparison.Ordinal)
+            && candidate.Contains('/');
     }
 
     private async Task<(bool Success, string Message)> DryRunAsync(List<PatchOperation> ops)

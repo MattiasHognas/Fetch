@@ -63,7 +63,7 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
             {
                 tool = pinnedTool,
                 reason = "The current todo explicitly targets this tool, so routing should stay on the active playbook step instead of revisiting completed steps.",
-                inputHint = BuildPinnedToolInputHint(pinnedTool)
+                inputHint = BuildPinnedToolInputHint(pinnedTool, plan.Kind)
             }));
         }
 
@@ -109,10 +109,12 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
         return true;
     }
 
-    private static string BuildPinnedToolInputHint(string toolName)
+    private static string BuildPinnedToolInputHint(string toolName, TaskKind taskKind)
     {
         return toolName switch
         {
+            "apply_diff" when taskKind is TaskKind.ArchitectureDocs or TaskKind.Documentation
+                => "Write only a docs markdown file such as docs/ARCHITECTURE.md using a real *** Begin Patch payload with *** Add File or *** Update File. Do not modify .cs files, and do not return prose or a router suggestion.",
             "apply_diff" => "Provide a real *** Begin Patch payload for the target file. Do not return prose or a router suggestion.",
             "read_file" => "Read the concrete file produced or needed by the current step.",
             "relationship_map" => "Provide JSON like {\"files\":[\"Program.cs\",\"Core/AgentLoop.cs\",\"Planning/Planning.cs\"]} using files already discovered from code_map/read_ranges.",
