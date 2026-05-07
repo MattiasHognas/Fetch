@@ -53,7 +53,8 @@ public sealed class AgentLoop
         {
             transcript = await CompactTranscriptIfNeededAsync(task, transcript);
             transcript += $"\n\nStep {step + 1} of {_config.MaxAgentSteps}.\n";
-            var route = await _router.ChooseAsync(task, transcript, _tools.Values, _state.SemanticSearchReady, plan);
+            var (currentTodo, completedTodos) = await GetTodoRoutingStateAsync();
+            var route = await _router.ChooseAsync(task, transcript, _tools.Values, _state.SemanticSearchReady, plan, currentTodo, completedTodos);
             await _logger.LogAsync("tool_route", new
             {
                 step,
@@ -625,9 +626,33 @@ public sealed class AgentLoop
             {
                 Status = "in_progress"
             };
+
+            while (nextIndex >= 0 && todos[nextIndex].Text.StartsWith("Optionally ", StringComparison.OrdinalIgnoreCase))
+            {
+                todos[nextIndex] = todos[nextIndex] with
+                {
+                    Status = "done"
+                };
+                nextIndex = todos.FindIndex(nextIndex + 1, t => string.Equals(t.Status, "pending", StringComparison.Ordinal));
+                if (nextIndex >= 0)
+                {
+                    todos[nextIndex] = todos[nextIndex] with
+                    {
+                        Status = "in_progress"
+                    };
+                }
+            }
         }
 
         await _todoStore.WriteAsync(todos);
+    }
+
+    private async Task<(string CurrentTodo, string CompletedTodos)> GetTodoRoutingStateAsync()
+    {
+        List<TodoItem> todos = await _todoStore.ReadAsync();
+        var currentTodo = todos.FirstOrDefault(t => string.Equals(t.Status, "in_progress", StringComparison.Ordinal))?.Text ?? "(none)";
+        var completedTodos = string.Join(" | ", todos.Where(t => string.Equals(t.Status, "done", StringComparison.Ordinal)).Select(t => t.Text));
+        return (currentTodo, string.IsNullOrWhiteSpace(completedTodos) ? "(none)" : completedTodos);
     }
 
     private static bool TryBlockRepeatedFailedToolCall(string toolName, string normalizedInput, HashSet<string> failedToolCalls, out string failure)

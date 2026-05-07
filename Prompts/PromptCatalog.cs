@@ -111,9 +111,13 @@ Task kind: {{task_kind}}
 Playbook hint: {{playbook_hint}}
 Required first tool (if step==0): {{required_first_tool}}
 Semantic search status: {{semantic_search_status}}
+Current todo: {{current_todo}}
+Completed todos: {{completed_todos}}
 
 Decision table:
 - task_kind in {ArchitectureDocs, Documentation, Refactor} AND step==0: return code_map.
+- If current todo names a specific tool, prefer that tool over earlier completed-step tools.
+- If current todo is a docs/code write step and recent state shows enough grounding evidence, prefer apply_diff.
 - Need exact identifier or text: search_content.
 - Need definitions/types: symbol_search.
 - Need usages: references_search.
@@ -129,6 +133,8 @@ Hard rules:
 - If recent state says grounding is required, do not choose apply_diff/apply_patch/create_file. Choose a read/search tool.
 - If the previous tool call failed, do not route to the exact same tool with the exact same input.
 - If a successful code_map result is in recent state, prefer read_ranges next over re-running code_map.
+- Do not route back to a completed-step tool unless the new input is narrower and clearly different.
+- If current todo is "Draft and write... (apply_diff)", do not route to code_map or repeat the same read_ranges call.
 
 Important input shapes:
 - read_ranges: [{"file":"path/to/file.cs","start":1,"end":80}] or {"file":"path/to/file.cs","start":1,"end":80}

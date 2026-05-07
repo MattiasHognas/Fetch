@@ -52,7 +52,7 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
 {
     private readonly LlmClient _llm = llm; private readonly PromptCatalog _prompts = prompts;
 
-    public Task<string> ChooseAsync(string task, string transcript, IEnumerable<ITool> tools, bool semanticSearchReady, PlanResult plan)
+    public Task<string> ChooseAsync(string task, string transcript, IEnumerable<ITool> tools, bool semanticSearchReady, PlanResult plan, string currentTodo, string completedTodos)
     {
         var p = _prompts.Render(PromptId.ToolRouter, new()
         {
@@ -62,7 +62,9 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
             ["semantic_search_status"] = semanticSearchReady ? "ready" : "missing",
             ["task_kind"] = plan.Kind.ToString(),
             ["playbook_hint"] = plan.Playbook.Hint,
-            ["required_first_tool"] = plan.Playbook.RequiredFirstTool ?? "(none)"
+            ["required_first_tool"] = plan.Playbook.RequiredFirstTool ?? "(none)",
+            ["current_todo"] = currentTodo,
+            ["completed_todos"] = completedTodos
         });
         return _llm.ChatAsync(p);
     }
