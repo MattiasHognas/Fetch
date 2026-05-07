@@ -183,6 +183,10 @@ public sealed class AgentLoop
                     _state.GroundingEvidenceBytes += result.Length;
                 }
                 TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
+                if (_state.LastTool is { IsError: false })
+                {
+                    await AdvanceTodoProgressAsync(toolName);
+                }
                 var recoveryGuidance = BuildRecoveryGuidance(toolName, result);
                 string? analysis = null;
                 if (toolName == "run_command")
@@ -584,6 +588,47 @@ public sealed class AgentLoop
     }
 
     private static string MakeToolCallKey(string toolName, string normalizedInput) => toolName + "\n" + normalizedInput;
+
+    private async Task AdvanceTodoProgressAsync(string toolName)
+    {
+        if (_state.CurrentPlaybook is null)
+        {
+            return;
+        }
+
+        List<TodoItem> todos = await _todoStore.ReadAsync();
+        if (todos.Count == 0)
+        {
+            return;
+        }
+
+        var marker = $"({toolName})";
+        var currentIndex = todos.FindIndex(t => string.Equals(t.Status, "in_progress", StringComparison.Ordinal));
+        if (currentIndex < 0)
+        {
+            return;
+        }
+
+        if (!todos[currentIndex].Text.Contains(marker, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        todos[currentIndex] = todos[currentIndex] with
+        {
+            Status = "done"
+        };
+        var nextIndex = todos.FindIndex(currentIndex + 1, t => string.Equals(t.Status, "pending", StringComparison.Ordinal));
+        if (nextIndex >= 0)
+        {
+            todos[nextIndex] = todos[nextIndex] with
+            {
+                Status = "in_progress"
+            };
+        }
+
+        await _todoStore.WriteAsync(todos);
+    }
 
     private static bool TryBlockRepeatedFailedToolCall(string toolName, string normalizedInput, HashSet<string> failedToolCalls, out string failure)
     {
