@@ -31,11 +31,16 @@ public sealed class AgentLoop
         {
             task
         });
-        var plan = await _planner.CreatePlanAsync(task, _agentMd);
+        PlanResult plan = await _planner.CreatePlanAsync(task, _agentMd);
+        _state.CurrentTaskKind = plan.Kind;
+        _state.CurrentPlaybook = plan.Playbook;
+        _state.GroundingEvidenceBytes = 0;
         await _logger.LogAsync("plan", new
         {
             task,
-            plan
+            kind = plan.Kind.ToString(),
+            playbook = plan.Playbook,
+            llmPlan = plan.LlmPlanJson
         });
         await PlannerTodoSeeder.SeedAsync(plan, _todoStore);
         var transcript = BuildInitialPrompt(task, plan);
@@ -45,7 +50,8 @@ public sealed class AgentLoop
         for (var step = 0; step < _config.MaxAgentSteps; step++)
         {
             transcript = await CompactTranscriptIfNeededAsync(task, transcript);
-            var route = await _router.ChooseAsync(task, transcript, _tools.Values, _state.SemanticSearchReady);
+            transcript += $"\n\nStep {step + 1} of {_config.MaxAgentSteps}.\n";
+            var route = await _router.ChooseAsync(task, transcript, _tools.Values, _state.SemanticSearchReady, plan);
             await _logger.LogAsync("tool_route", new
             {
                 step,
@@ -63,7 +69,7 @@ public sealed class AgentLoop
             if (!JsonHelper.TryParseObject(response, out JsonDocument? doc, out var cleaned) || doc is null)
             {
                 transcript += LooksLikeDraftContent(response)
-                    ? "\nThat was prose or draft diagram content, not an executable step. Do not draft the architecture yet. Your next response must be exactly one JSON tool call, preferably refine_context, read_ranges, or another concrete read/search step. Do not repeat repo_tree with the same input."
+                    ? "\nThat was prose or draft diagram content, not an executable step. Do not draft the architecture yet. Your next response must be exactly one JSON tool call, preferably code_map, read_ranges, or another concrete read/search step."
                     : "\nReturn ONLY one valid JSON object with no prose, no fenced code block, and no tool-call markup.";
                 await _logger.LogAsync("error", new
                 {
@@ -107,6 +113,20 @@ public sealed class AgentLoop
                 }
                 var toolName = t.ValueKind == JsonValueKind.String ? t.GetString() ?? "" : "";
                 var input = ReadJsonValue(inp);
+
+                if (TryEnforceRequiredFirstTool(step, toolName, plan, out var firstToolNudge))
+                {
+                    transcript += $"\n{firstToolNudge}";
+                    await _logger.LogAsync("error", new
+                    {
+                        step,
+                        kind = "required_first_tool",
+                        expected = plan.Playbook.RequiredFirstTool,
+                        got = toolName
+                    });
+                    continue;
+                }
+
                 if (!_tools.TryGetValue(toolName, out ITool? tool))
                 {
                     transcript += $"\nUnknown tool: {toolName}\nAvailable tools:\n{RenderTools()}";
@@ -154,7 +174,11 @@ public sealed class AgentLoop
                     Console.WriteLine(blocker);
                     return;
                 }
-                hasGroundingEvidence = hasGroundingEvidence || IsGroundingEvidence(toolName, result);
+                if (IsGroundingEvidence(toolName, result))
+                {
+                    hasGroundingEvidence = true;
+                    _state.GroundingEvidenceBytes += result.Length;
+                }
                 var recoveryGuidance = BuildRecoveryGuidance(toolName, result);
                 string? analysis = null;
                 if (toolName == "run_command")
@@ -183,17 +207,79 @@ public sealed class AgentLoop
                     + (recoveryGuidance is null ? "" : $"\nRecovery guidance:\n{recoveryGuidance}\n");
             }
         }
-        Console.WriteLine("Stopped after max steps.");
+        await SynthesizeFinalAsync(task, plan, transcript);
+    }
+
+    private bool TryEnforceRequiredFirstTool(int step, string toolName, PlanResult plan, out string nudge)
+    {
+        nudge = "";
+        if (step != 0)
+        {
+            return false;
+        }
+        var required = plan.Playbook.RequiredFirstTool;
+        if (string.IsNullOrEmpty(required) || string.Equals(toolName, required, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        if (!_tools.ContainsKey(required))
+        {
+            return false;
+        }
+        nudge = $"For task kind {plan.Kind}, the first tool call MUST be {required} (you chose {toolName}). Re-issue the call as {{\"tool\":\"{required}\",\"input\":\"\"}} (empty input maps the whole repo).";
+        return true;
+    }
+
+    private async Task SynthesizeFinalAsync(string task, PlanResult plan, string transcript)
+    {
+        await _logger.LogAsync("max_steps_reached", new
+        {
+            steps = _config.MaxAgentSteps
+        });
+        try
+        {
+            var summary = await _compactor.CompactAsync(transcript);
+            var prompt = _prompts.Render(PromptId.FinalSynthesis, new()
+            {
+                ["task"] = task,
+                ["task_kind"] = plan.Kind.ToString(),
+                ["transcript"] = summary
+            });
+            var synthesized = await _llm.ChatAsync(prompt);
+            var text = string.IsNullOrWhiteSpace(synthesized)
+                ? $"Stopped after {_config.MaxAgentSteps} steps without producing a final answer."
+                : synthesized.Trim();
+            _events.Add(AgentEventType.Final, "Final", text);
+            await _logger.LogAsync("final", new
+            {
+                text,
+                synthesized = true
+            });
+            Console.WriteLine(text);
+        }
+        catch (Exception ex)
+        {
+            var text = $"Stopped after {_config.MaxAgentSteps} steps. Final synthesis failed: {ex.Message}";
+            _events.Add(AgentEventType.Final, "Final", text);
+            await _logger.LogAsync("final", new
+            {
+                text,
+                synthesized = false
+            });
+            Console.WriteLine(text);
+        }
     }
 
     private static string? BuildRecoveryGuidance(string toolName, string result)
     {
         return toolName switch
         {
+            "code_map" when !result.StartsWith("code_map: no source files", StringComparison.OrdinalIgnoreCase)
+                => "code_map gave you the repo skeleton. Next, pick 3-6 files from the map and call read_ranges on them to get concrete code before drafting any document.",
             "semantic_search" when !result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
                 => "Use these semantic_search results to narrow to 3-8 concrete files with refine_context or read_ranges. Do not jump back to repo_tree with the same broad input.",
             "repo_tree" when !result.StartsWith("Repeated", StringComparison.OrdinalIgnoreCase)
-                => "Repo tree only gives broad structure. Your next step should be a more specific search or read tool, or a different repo_tree depth if you truly need different structure evidence.",
+                => "Repo tree only gives broad structure. For architecture/overview tasks call code_map next; otherwise call a more specific search or read tool.",
             "semantic_search" when result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
                 => "Semantic search is unavailable until the index is built. Do not call semantic_search again in this run. Use repo_tree, search_files, search_content, and refine_context to gather evidence instead.",
             "repo_tree" when result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
@@ -428,15 +514,21 @@ public sealed class AgentLoop
         };
     }
 
-    private static bool TryBlockUngroundedWrite(ITool tool, string input, bool hasGroundingEvidence, out string failure)
+    private bool TryBlockUngroundedWrite(ITool tool, string input, bool hasGroundingEvidence, out string failure)
     {
         failure = "";
-        if (hasGroundingEvidence || !RequiresGroundingEvidence(tool.Name, input))
+        if (!RequiresGroundingEvidence(tool.Name, input))
         {
             return false;
         }
-
-        failure = "Grounding required before writing documentation. Search or read repo files first and only write after you have concrete evidence from this codebase.";
+        const int minEvidenceBytes = 2048;
+        if (hasGroundingEvidence && _state.GroundingEvidenceBytes >= minEvidenceBytes)
+        {
+            return false;
+        }
+        failure = "Grounding required before writing documentation. Call code_map and at least one read tool (read_ranges, read_file, context_pack) on real repo files first; accumulated evidence must be at least "
+            + minEvidenceBytes
+            + " bytes. Do not retry the write yet.";
         return true;
     }
 
@@ -494,7 +586,9 @@ public sealed class AgentLoop
             return false;
         }
 
-        if (toolName is not ("repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files"))
+        // repo_tree alone is NOT sufficient grounding for docs writes - it lists files without their content.
+        // code_map, read_*, search_content with hits, semantic_search, context_pack all qualify.
+        if (toolName is not ("code_map" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack"))
         {
             return false;
         }
@@ -503,7 +597,7 @@ public sealed class AgentLoop
         return !IsDiscoveryFailure(trimmed);
     }
 
-    private static bool IsDiscoveryTool(string toolName) => toolName is "repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files";
+    private static bool IsDiscoveryTool(string toolName) => toolName is "repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files" or "code_map";
 
     private static bool IsDiscoveryFailure(string result)
     {
@@ -560,8 +654,33 @@ public sealed class AgentLoop
             || normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
     }
 
-    private string BuildInitialPrompt(string task, string plan) => _prompts.Render(PromptId.AgentInitial, new() { ["agent_md"] = _agentMd ?? "", ["previous_summary"] = _session.ReadSummary(), ["recent_log"] = _session.RecentLogTail(), ["plan"] = plan, ["tools"] = RenderTools(), ["task"] = task, ["semantic_search_status"] = _state.SemanticSearchReady ? "ready" : "missing" });
-    private string BuildCompactedPrompt(string task, string summary) => _prompts.Render(PromptId.AgentCompacted, new() { ["agent_md"] = _agentMd ?? "", ["task"] = task, ["summary"] = summary, ["tools"] = RenderTools(), ["semantic_search_status"] = _state.SemanticSearchReady ? "ready" : "missing" });
+    private string BuildInitialPrompt(string task, PlanResult plan) => _prompts.Render(PromptId.AgentInitial, new()
+    {
+        ["agent_md"] = _agentMd ?? "",
+        ["previous_summary"] = _session.ReadSummary(),
+        ["recent_log"] = _session.RecentLogTail(),
+        ["plan"] = plan.LlmPlanJson,
+        ["task_kind"] = plan.Kind.ToString(),
+        ["playbook_hint"] = plan.Playbook.Hint,
+        ["playbook_steps"] = string.Join("\n", plan.Playbook.Steps.Select((s, i) => $"{i + 1}. {s}")),
+        ["required_first_tool"] = plan.Playbook.RequiredFirstTool ?? "(none)",
+        ["tools"] = RenderTools(),
+        ["task"] = task,
+        ["semantic_search_status"] = _state.SemanticSearchReady ? "ready" : "missing"
+    });
+    private string BuildCompactedPrompt(string task, string summary) => _prompts.Render(PromptId.AgentCompacted, new()
+    {
+        ["agent_md"] = _agentMd ?? "",
+        ["task"] = task,
+        ["summary"] = summary,
+        ["tools"] = RenderTools(),
+        ["semantic_search_status"] = _state.SemanticSearchReady ? "ready" : "missing",
+        ["task_kind"] = _state.CurrentTaskKind.ToString(),
+        ["playbook_hint"] = _state.CurrentPlaybook?.Hint ?? "",
+        ["playbook_steps"] = _state.CurrentPlaybook is null
+            ? ""
+            : string.Join("\n", _state.CurrentPlaybook.Steps.Select((s, i) => $"{i + 1}. {s}"))
+    });
     private string RenderTools() => string.Join("\n", _tools.Values.Select(t => $"- {t.Name}: {t.Description}"));
     private string TrimToolResult(string text) => text.Length <= _config.MaxToolResultChars ? text : text[.._config.MaxToolResultChars] + "\n[tool result truncated]";
     private string? LoadAgentContext()

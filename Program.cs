@@ -37,6 +37,7 @@ static Runtime BuildRuntime(string? sessionId, bool newSession)
         new RepoTreeTool(ignore, sandbox),
         new SearchTool(repo),
         searchContent,
+        new CodeMapTool(config, sandbox, ignore, lspSelector),
         new LspSymbolSearchTool(config, sandbox, lspSelector, searchContent),
         new LspReferencesSearchTool(config, sandbox, lspSelector, searchContent),
         new SemanticSearchTool(semanticIndex),
@@ -117,6 +118,36 @@ agentCommand.SetHandler(async (prompt, sessionId, newSession) =>
     {
         Console.WriteLine("Missing task.");
         return;
+    }
+    if (runtime.Config.AutoBuildSemanticIndexOnAgentRun && !runtime.SemanticIndex.Exists)
+    {
+        Task<SemanticIndexStats> indexTask = runtime.SemanticIndex.BuildAsync();
+        var delayTask = Task.Delay(TimeSpan.FromSeconds(runtime.Config.SemanticIndexBuildTimeoutSeconds));
+        Task completed = await Task.WhenAny(indexTask, delayTask);
+        if (completed == indexTask)
+        {
+            try
+            {
+                _ = await indexTask;
+                runtime.State.SemanticSearchReady = runtime.SemanticIndex.Exists;
+                Console.WriteLine("Semantic index built.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Semantic index build failed: {ex.Message}");
+            }
+        }
+        else
+        {
+            Console.WriteLine("Semantic index build still running in background; agent will proceed without it.");
+            _ = indexTask.ContinueWith(t =>
+            {
+                if (t.Status == TaskStatus.RanToCompletion)
+                {
+                    runtime.State.SemanticSearchReady = runtime.SemanticIndex.Exists;
+                }
+            }, TaskScheduler.Default);
+        }
     }
     await runtime.Agent.RunAsync(task);
 }, agentPrompt, sessionOption, newSessionOption);

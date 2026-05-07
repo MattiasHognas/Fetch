@@ -9,4 +9,5 @@ public static class PromptId
     public const string CommandAnalyze = "command.analyze";
     public const string TranscriptCompact = "transcript.compact";
     public const string ContextRefine = "context.refine";
+    public const string FinalSynthesis = "agent.final_synthesis";
 }

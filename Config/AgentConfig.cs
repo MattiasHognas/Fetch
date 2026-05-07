@@ -12,8 +12,10 @@ public sealed class AgentConfig
     public string EmbeddingBaseUrl { get; set; } = "http://localhost:11434";
     public string EmbeddingModel { get; set; } = "nomic-embed-text";
     public string ApprovalMode { get; set; } = "ask";
-    public int MaxAgentSteps { get; set; } = 16;
+    public int MaxAgentSteps { get; set; } = 24;
     public int MaxFailedCommandAttempts { get; set; } = 4;
+    public bool AutoBuildSemanticIndexOnAgentRun { get; set; } = true;
+    public int SemanticIndexBuildTimeoutSeconds { get; set; } = 30;
     public int DefaultCommandTimeoutSeconds { get; set; } = 60;
     public int MaxCommandTimeoutSeconds { get; set; } = 600;
     public int MaxToolResultChars { get; set; } = 12000;

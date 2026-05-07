@@ -6,13 +6,47 @@ public sealed class ContextPackTool(FileReadRegistry registry, PathSandbox sandb
 {
     private readonly FileReadRegistry _registry = registry; private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets; private readonly AgentConfig _config = config;
 
-    public string Name => "context_pack"; public string Description => "Pack multiple files into one bounded context. Input: one path per line."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "context_pack"; public string Description => "Pack multiple files into one bounded context. Input: one repo-relative path per line."; public ApprovalMode Approval => ApprovalMode.Auto;
     public async Task<string> RunAsync(string input)
     {
-        var paths = input.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct().Take(_config.MaxContextPackFiles).ToList();
-        if (paths.Count == 0)
+        if (string.IsNullOrWhiteSpace(input))
         {
             return "No files requested.";
+        }
+        if (input.Contains("|||", StringComparison.Ordinal))
+        {
+            return "Invalid input. context_pack expects one repo-relative path per line, not path|||content. To create or edit a file, use apply_diff.";
+        }
+        if (input.Contains("```", StringComparison.Ordinal))
+        {
+            return "Invalid input. context_pack does not accept fenced code blocks. Provide one repo-relative path per line.";
+        }
+
+        var rawLines = input.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var paths = new List<string>();
+        var rejected = new List<string>();
+        foreach (var line in rawLines)
+        {
+            if (LooksLikePath(line))
+            {
+                if (!paths.Contains(line))
+                {
+                    paths.Add(line);
+                }
+            }
+            else
+            {
+                rejected.Add(line);
+            }
+            if (paths.Count >= _config.MaxContextPackFiles)
+            {
+                break;
+            }
+        }
+        if (paths.Count == 0)
+        {
+            var hint = rejected.Count > 0 ? $" Rejected lines did not look like file paths (e.g. '{rejected[0]}'). Provide one repo-relative path per line." : "";
+            return "No valid files requested." + hint;
         }
 
         var chunks = new List<string>();
@@ -40,6 +74,24 @@ public sealed class ContextPackTool(FileReadRegistry registry, PathSandbox sandb
             total += chunk.Length;
         }
         return string.Join("\n\n", chunks);
+    }
+
+    private static bool LooksLikePath(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return false;
+        }
+        if (line.StartsWith('#') || line.StartsWith("//", StringComparison.Ordinal) || line.StartsWith("--", StringComparison.Ordinal))
+        {
+            return false;
+        }
+        if (line.Contains(' ') && !line.Contains('/') && !line.Contains('\\'))
+        {
+            return false;
+        }
+        // Disallow obvious markdown/prose lines.
+        return !line.StartsWith('*') && !line.StartsWith('-') && !line.StartsWith('+') && line.IndexOfAny(Path.GetInvalidPathChars()) < 0;
     }
     private static string AddLineNumbers(string text) => string.Join("\n", text.Replace("\r\n", "\n").Split('\n').Select((line, i) => $"{i + 1,4}: {line}"));
 }

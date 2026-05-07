@@ -24,6 +24,18 @@ public sealed class AgentRuntimeState
     {
         get; set;
     }
+    public TaskKind CurrentTaskKind
+    {
+        get; set;
+    } = TaskKind.Generic;
+    public Playbook? CurrentPlaybook
+    {
+        get; set;
+    }
+    public int GroundingEvidenceBytes
+    {
+        get; set;
+    }
 }
 
 public sealed record ToolExecution(string Tool, string Input, string Result, bool IsError);
