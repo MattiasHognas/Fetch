@@ -60,11 +60,11 @@ public static class TaskClassifier
                 [
                     "Get a code map of the repository (code_map)",
                     "Read 3-6 anchor files identified in the code map (read_ranges)",
-                    "Optionally inspect cross-cutting symbols (references_search)",
+                    "Map semantic relationships between the anchor files (relationship_map)",
                     "Draft and write the documentation file (apply_diff)",
                     "Verify the file was created (read_file)"
                 ],
-                Hint: "Architecture/overview task: ground in code_map output before drafting any document; only call apply_diff after reading concrete files."),
+                Hint: "Architecture/overview task: ground in code_map output, then build relationship edges between anchor files before drafting any document; only call apply_diff after reading concrete files."),
             TaskKind.Documentation => new Playbook(
                 kind,
                 RequiredFirstTool: "code_map",

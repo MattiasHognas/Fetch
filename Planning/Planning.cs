@@ -115,6 +115,7 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
         {
             "apply_diff" => "Provide a real *** Begin Patch payload for the target file. Do not return prose or a router suggestion.",
             "read_file" => "Read the concrete file produced or needed by the current step.",
+            "relationship_map" => "Provide JSON like {\"files\":[\"Program.cs\",\"Core/AgentLoop.cs\",\"Planning/Planning.cs\"]} using files already discovered from code_map/read_ranges.",
             "run_command" => "Run the narrowest relevant build, test, or verification command for the changed slice.",
             "references_search" => "Provide a concrete symbol and file context from the files already read.",
             _ => "Provide the concrete input required by the current todo step."

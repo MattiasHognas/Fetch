@@ -35,7 +35,7 @@ Semantic search status:
 {{semantic_search_status}}
 
 Tool decision table (pick ONE per step):
-- Architecture / overview / refactor / docs about the repo: code_map FIRST, then read_ranges on specific files, then apply_diff.
+- Architecture / overview / refactor / docs about the repo: code_map FIRST, then read_ranges on specific files, then relationship_map for semantic edges, then apply_diff.
 - Bug fix / focused change: search_content or symbol_search to locate, read_ranges to confirm, apply_diff, run_command to verify.
 - Question about the codebase: search_content or symbol_search, read_ranges, then final.
 - Need broad concept search and semantic_search status is "ready": semantic_search, then refine_context or read_ranges.
@@ -44,10 +44,11 @@ Hard rules:
 - Return ONLY one JSON object: {"tool":"name","input":"value"} OR {"final":"answer"}. No prose, no fences, no multiple JSON objects.
 - The loop continues only when you return a tool call. There is no separate "continue" output.
 - Return {"final":"..."} only when the task is actually complete or you can name the exact blocker. Never use final for "next step" or "I will now" content.
-- If a write tool is blocked for missing grounding evidence, your next call MUST be a read/search tool (code_map, read_ranges, read_file, search_content, semantic_search, symbol_search, references_search, context_pack). Do not retry the write.
+- If a write tool is blocked for missing grounding evidence, your next call MUST be a read/search tool (code_map, read_ranges, read_file, search_content, semantic_search, symbol_search, references_search, relationship_map, context_pack). Do not retry the write.
 - Never repeat the exact same tool call after it failed. Change the tool or the input.
 - If semantic_search reports the index is missing, do not call it again in this run.
 - read_ranges input: [{"file":"path/to/file.cs","start":1,"end":80}] or {"file":"path/to/file.cs","start":1,"end":80}.
+- relationship_map input: {"files":["Program.cs","Core/AgentLoop.cs","Planning/Planning.cs"]}
 - Example paths are illustrative only. Use actual files discovered from code_map, search results, or prior reads; do not default to Program.cs unless it is clearly relevant.
 - apply_diff input MUST be a real patch starting with *** Begin Patch and ending with *** End Patch.
 - For a new file, use *** Add File: path and prefix each content line with +.
@@ -117,10 +118,12 @@ Completed todos: {{completed_todos}}
 Decision table:
 - task_kind in {ArchitectureDocs, Documentation, Refactor} AND step==0: return code_map.
 - If current todo names a specific tool, prefer that tool over earlier completed-step tools.
+- If current todo is relationship discovery, choose relationship_map with the anchor files already read.
 - If current todo is a docs/code write step and recent state shows enough grounding evidence, prefer apply_diff.
 - Need exact identifier or text: search_content.
 - Need definitions/types: symbol_search.
 - Need usages: references_search.
+- Need how classes fit together, constructor dependencies, composition, or call flow between selected files: relationship_map.
 - Have search results, need precise lines: read_ranges or refine_context.
 - Need multi-file overview: code_map (preferred) or context_pack.
 - Concept search and semantic_search status is "ready": semantic_search.
@@ -133,11 +136,13 @@ Hard rules:
 - If recent state says grounding is required, do not choose apply_diff/apply_patch/create_file. Choose a read/search tool.
 - If the previous tool call failed, do not route to the exact same tool with the exact same input.
 - If a successful code_map result is in recent state, prefer read_ranges next over re-running code_map.
+- If read_ranges already produced anchor files for an architecture task, prefer relationship_map before drafting documentation.
 - Do not route back to a completed-step tool unless the new input is narrower and clearly different.
 - If current todo is "Draft and write... (apply_diff)", do not route to code_map or repeat the same read_ranges call.
 
 Important input shapes:
 - read_ranges: [{"file":"path/to/file.cs","start":1,"end":80}] or {"file":"path/to/file.cs","start":1,"end":80}
+- relationship_map: {"files":["Program.cs","Core/AgentLoop.cs","Planning/Planning.cs"]}
 - apply_diff add file: *** Begin Patch\n*** Add File: docs/ARCHITECTURE.md\n+line 1\n*** End Patch
 - code_map: empty string for whole repo, or {"path":"Tools","include":"*.cs"} to scope.
 

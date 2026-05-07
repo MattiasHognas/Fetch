@@ -38,6 +38,7 @@ static Runtime BuildRuntime(string? sessionId, bool newSession)
         new SearchTool(repo),
         searchContent,
         new CodeMapTool(config, sandbox, ignore, lspSelector),
+        new RelationshipMapTool(config, sandbox, lspSelector),
         new LspSymbolSearchTool(config, sandbox, lspSelector, searchContent),
         new LspReferencesSearchTool(config, sandbox, lspSelector, searchContent),
         new SemanticSearchTool(semanticIndex),

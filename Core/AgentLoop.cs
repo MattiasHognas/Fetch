@@ -701,7 +701,7 @@ public sealed class AgentLoop
             return "";
         }
 
-        if (toolName is "code_map" or "read_ranges" or "symbol_search" or "references_search" or "todo_write")
+        if (toolName is "code_map" or "read_ranges" or "symbol_search" or "references_search" or "relationship_map" or "todo_write")
         {
             try
             {
@@ -833,7 +833,7 @@ public sealed class AgentLoop
 
         // repo_tree alone is NOT sufficient grounding for docs writes - it lists files without their content.
         // code_map, read_*, search_content with hits, semantic_search, context_pack all qualify.
-        if (toolName is not ("code_map" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack"))
+        if (toolName is not ("code_map" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "relationship_map" or "read_file" or "read_head" or "read_ranges" or "context_pack"))
         {
             return false;
         }
@@ -842,7 +842,7 @@ public sealed class AgentLoop
         return !IsDiscoveryFailure(trimmed);
     }
 
-    private static bool IsDiscoveryTool(string toolName) => toolName is "repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files" or "code_map";
+    private static bool IsDiscoveryTool(string toolName) => toolName is "repo_tree" or "search_files" or "search_content" or "semantic_search" or "symbol_search" or "references_search" or "relationship_map" or "read_file" or "read_head" or "read_ranges" or "context_pack" or "list_files" or "code_map";
 
     private static bool IsDiscoveryFailure(string result)
     {
