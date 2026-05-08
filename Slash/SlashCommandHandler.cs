@@ -123,7 +123,7 @@ public sealed class SlashCommandHandler(AgentSession session, TodoStore todoStor
             Console.WriteLine("No active phase plan. Run a task first.");
             return;
         }
-        var phases = _state.CurrentPhasePlan.Phases;
+        IReadOnlyList<AgentPhase> phases = _state.CurrentPhasePlan.Phases;
         var idx = phases.ToList().IndexOf(_state.CurrentPhase);
         Console.WriteLine($"Task kind:   {_state.CurrentTaskKind}");
         Console.WriteLine($"Greenfield:  {_state.CurrentPhasePlan.IsGreenfield}");

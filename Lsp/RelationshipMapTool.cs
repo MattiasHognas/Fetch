@@ -156,7 +156,7 @@ public sealed class RelationshipMapTool(AgentConfig config, PathSandbox sandbox,
                         {
                             continue;
                         }
-                        var target = string.IsNullOrWhiteSpace(detail) ? targetName! : $"{detail}.{targetName}";
+                        var target = string.IsNullOrWhiteSpace(detail) ? targetName : $"{detail}.{targetName}";
                         edges.Add(new RelationshipEdge($"{method.Owner}.{method.Name}", target, _sandbox.Relative(parsed.LocalPath)));
                     }
                 }

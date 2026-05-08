@@ -38,15 +38,15 @@ public static class PhaseToolPolicy
     };
 
     public static bool IsAllowed(string toolName, AgentPhase phase) =>
-        Allowed.TryGetValue(phase, out var set) && set.Contains(toolName);
+        Allowed.TryGetValue(phase, out HashSet<string>? set) && set.Contains(toolName);
 
     public static IEnumerable<ITool> Filter(IEnumerable<ITool> tools, AgentPhase phase) =>
-        Allowed.TryGetValue(phase, out var set)
+        Allowed.TryGetValue(phase, out HashSet<string>? set)
             ? tools.Where(t => set.Contains(t.Name))
             : [];
 
     public static IReadOnlyCollection<string> AllowedToolNames(AgentPhase phase) =>
-        Allowed.TryGetValue(phase, out var set) ? set : (IReadOnlyCollection<string>)Array.Empty<string>();
+        Allowed.TryGetValue(phase, out HashSet<string>? set) ? set : Array.Empty<string>();
 
     public static string PhaseHint(AgentPhase phase) => phase switch
     {
@@ -56,6 +56,7 @@ public static class PhaseToolPolicy
             "Planning phase: turn evidence into a concrete todo list with todo_write. Each todo should name the tool that will satisfy it, e.g. 'Read AgentLoop.cs (read_ranges)'. Then return phaseDone.",
         AgentPhase.Editing =>
             "Editing phase: apply focused patches (apply_diff/apply_patch) or create files. Read first, write second. Do NOT run commands or do new exploration here.\n" +
+            "You MUST attempt apply_diff (or another mutation tool) for the current todo before returning {\"phaseDone\":true}. phaseDone with no successful mutation will be rejected.\n" +
             "apply_diff input MUST be a raw V4A patch string. Example:\n" +
             "*** Begin Patch\n" +
             "*** Update File: path/to/File.cs\n" +
@@ -69,6 +70,7 @@ public static class PhaseToolPolicy
             "Verification phase: run the narrowest relevant build/test/inspection via run_command and verify the change. Do NOT edit files here.",
         AgentPhase.Answering =>
             "Answering phase: synthesize a final answer that cites concrete file paths. Use read_ranges to confirm specifics. End with {\"final\":\"...\"}.",
+        AgentPhase.Triage => throw new NotImplementedException(),
         _ => ""
     };
 }

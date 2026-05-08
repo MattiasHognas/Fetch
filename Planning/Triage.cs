@@ -17,7 +17,7 @@ public sealed class TriageRunner(LlmClient llm, PromptCatalog prompts, AgentConf
 
     public async Task<TriageResult> RunAsync(string task, string? agentMd)
     {
-        var snapshot = ProbeRepo();
+        RepoSnapshot snapshot = ProbeRepo();
         var prompt = _prompts.Render(PromptId.Triage, new()
         {
             ["task"] = task,
@@ -25,7 +25,7 @@ public sealed class TriageRunner(LlmClient llm, PromptCatalog prompts, AgentConf
             ["repo_snapshot"] = snapshot.Description
         });
         var raw = await _llm.ChatAsync(prompt);
-        return TryParse(raw, snapshot, out var parsed)
+        return TryParse(raw, snapshot, out TriageResult? parsed)
             ? parsed
             : Fallback(task, snapshot, raw);
     }
@@ -33,32 +33,32 @@ public sealed class TriageRunner(LlmClient llm, PromptCatalog prompts, AgentConf
     private static bool TryParse(string raw, RepoSnapshot snapshot, out TriageResult result)
     {
         result = null!;
-        if (!JsonHelper.TryParseObject(raw, out var doc, out _) || doc is null)
+        if (!JsonHelper.TryParseObject(raw, out JsonDocument? doc, out _) || doc is null)
         {
             return false;
         }
         try
         {
-            var root = doc.RootElement;
-            var kindStr = root.TryGetProperty("kind", out var k) ? k.GetString() ?? "Generic" : "Generic";
-            if (!Enum.TryParse<TaskKind>(kindStr, ignoreCase: true, out var kind))
+            JsonElement root = doc.RootElement;
+            var kindStr = root.TryGetProperty("kind", out JsonElement k) ? k.GetString() ?? "Generic" : "Generic";
+            if (!Enum.TryParse(kindStr, ignoreCase: true, out TaskKind kind))
             {
                 kind = TaskKind.Generic;
             }
             var phases = new List<AgentPhase>();
-            if (root.TryGetProperty("phases", out var p) && p.ValueKind == JsonValueKind.Array)
+            if (root.TryGetProperty("phases", out JsonElement p) && p.ValueKind == JsonValueKind.Array)
             {
-                foreach (var el in p.EnumerateArray())
+                foreach (JsonElement el in p.EnumerateArray())
                 {
-                    if (el.ValueKind == JsonValueKind.String && Enum.TryParse<AgentPhase>(el.GetString(), true, out var ph) && ph != AgentPhase.Triage)
+                    if (el.ValueKind == JsonValueKind.String && Enum.TryParse(el.GetString(), true, out AgentPhase ph) && ph != AgentPhase.Triage)
                     {
                         phases.Add(ph);
                     }
                 }
             }
-            var isGreenfield = (root.TryGetProperty("isGreenfield", out var g) && g.ValueKind == JsonValueKind.True) || snapshot.IsGreenfield;
-            var goal = root.TryGetProperty("goal", out var gl) ? gl.GetString() ?? "" : "";
-            var needsTests = !root.TryGetProperty("needsTests", out var nt) || nt.ValueKind != JsonValueKind.False;
+            var isGreenfield = (root.TryGetProperty("isGreenfield", out JsonElement g) && g.ValueKind == JsonValueKind.True) || snapshot.IsGreenfield;
+            var goal = root.TryGetProperty("goal", out JsonElement gl) ? gl.GetString() ?? "" : "";
+            var needsTests = !root.TryGetProperty("needsTests", out JsonElement nt) || nt.ValueKind != JsonValueKind.False;
             if (phases.Count == 0)
             {
                 phases = DefaultPhases(kind, isGreenfield);
@@ -74,26 +74,25 @@ public sealed class TriageRunner(LlmClient llm, PromptCatalog prompts, AgentConf
 
     private static TriageResult Fallback(string task, RepoSnapshot snapshot, string raw)
     {
-        var kind = TaskClassifier.Classify(task);
-        var phases = DefaultPhases(kind, snapshot.IsGreenfield);
+        TaskKind kind = TaskClassifier.Classify(task);
+        List<AgentPhase> phases = DefaultPhases(kind, snapshot.IsGreenfield);
         return new TriageResult(kind, new PhasePlan(kind, phases, snapshot.IsGreenfield, task), task, true, raw);
     }
 
     private static List<AgentPhase> DefaultPhases(TaskKind kind, bool isGreenfield)
     {
-        if (isGreenfield)
-        {
-            return [AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification];
-        }
-        return kind switch
-        {
-            TaskKind.Question => [AgentPhase.Discovery, AgentPhase.Answering],
-            TaskKind.ArchitectureDocs or TaskKind.Documentation =>
-                [AgentPhase.Discovery, AgentPhase.Editing, AgentPhase.Verification],
-            TaskKind.BugFix or TaskKind.Refactor or TaskKind.Feature =>
-                [AgentPhase.Discovery, AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification],
-            _ => [AgentPhase.Discovery, AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification]
-        };
+        return isGreenfield
+            ? [AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification]
+            : kind switch
+            {
+                TaskKind.Question => [AgentPhase.Discovery, AgentPhase.Answering],
+                TaskKind.ArchitectureDocs or TaskKind.Documentation =>
+                    [AgentPhase.Discovery, AgentPhase.Editing, AgentPhase.Verification],
+                TaskKind.BugFix or TaskKind.Refactor or TaskKind.Feature =>
+                    [AgentPhase.Discovery, AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification],
+                TaskKind.Generic => throw new NotImplementedException(),
+                _ => [AgentPhase.Discovery, AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification]
+            };
     }
 
     private RepoSnapshot ProbeRepo()
@@ -143,7 +142,7 @@ public sealed class TriageRunner(LlmClient llm, PromptCatalog prompts, AgentConf
         stack.Push((root, 0));
         while (stack.Count > 0)
         {
-            var (dir, depth) = stack.Pop();
+            (var dir, var depth) = stack.Pop();
             string[] files;
             string[] subs;
             try

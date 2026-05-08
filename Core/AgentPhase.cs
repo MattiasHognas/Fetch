@@ -11,10 +11,10 @@ public enum AgentPhase
 }
 
 /// <summary>
-/// The ordered set of phases the agent will execute for a given task. Built by <see cref="Fetch.Planning.TriageRunner"/>.
+/// The ordered set of phases the agent will execute for a given task. Built by <see cref="TriageRunner"/>.
 /// </summary>
 public sealed record PhasePlan(
-    Fetch.Planning.TaskKind Kind,
+    TaskKind Kind,
     IReadOnlyList<AgentPhase> Phases,
     bool IsGreenfield,
     string Goal);

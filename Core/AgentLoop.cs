@@ -110,7 +110,7 @@ public sealed class AgentLoop
         var transcript = "";
         var successfulDiscoveryCalls = new HashSet<string>(StringComparer.Ordinal);
         var failedToolCalls = new HashSet<string>(StringComparer.Ordinal);
-        var phases = triage.Plan.Phases;
+        IReadOnlyList<AgentPhase> phases = triage.Plan.Phases;
 
         for (var phaseIndex = 0; phaseIndex < phases.Count; phaseIndex++)
         {
@@ -127,6 +127,7 @@ public sealed class AgentLoop
 
             var repeatedBlockedToolCalls = 0;
             var phaseDone = false;
+            var phaseHadSuccessfulMutation = false;
             for (var phaseStep = 0; phaseStep < _config.MaxStepsPerPhase && globalStep < _config.MaxAgentSteps; phaseStep++, globalStep++)
             {
                 transcript = await CompactTranscriptIfNeededAsync(task, transcript, phase);
@@ -177,6 +178,17 @@ public sealed class AgentLoop
                                 phase = phase.ToString(),
                                 step = phaseStep,
                                 reason = "no_grounding_evidence"
+                            });
+                            continue;
+                        }
+                        if (phase is AgentPhase.Editing && !phaseHadSuccessfulMutation)
+                        {
+                            transcript += "\nphaseDone rejected: Editing requires at least one successful mutation (apply_diff, apply_patch, create_file, delete_file, or rename_file) before advancing. Read the target file, then call apply_diff with a real *** Begin Patch payload whose '-' lines match the file byte-for-byte. Do not return phaseDone until a mutation succeeds.";
+                            await _logger.LogAsync("phase_done_rejected", new
+                            {
+                                phase = phase.ToString(),
+                                step = phaseStep,
+                                reason = "no_successful_mutation"
                             });
                             continue;
                         }
@@ -327,6 +339,7 @@ public sealed class AgentLoop
                         if (MutationToolNames.Contains(toolName))
                         {
                             reportMutation(true);
+                            phaseHadSuccessfulMutation = true;
                         }
                         // todos advance at phase boundary, not per tool call.
                         if (isLastPhase && await TryCompleteRunAsync(task, toolName, input, result))
@@ -448,16 +461,6 @@ public sealed class AgentLoop
         }
 
         return null;
-    }
-
-    private static bool TryEnforceRequiredFirstTool(int step, string toolName, TriageResult triage, out string nudge)
-    {
-        nudge = "";
-        // Phase gating now handles this; kept as a no-op stub to avoid breaking callers.
-        _ = step;
-        _ = toolName;
-        _ = triage;
-        return false;
     }
 
     private static bool TryEnforceCurrentTodoTool(string currentTodo, string toolName, out string nudge)

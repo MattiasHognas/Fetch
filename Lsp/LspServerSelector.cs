@@ -11,10 +11,7 @@ public sealed class LspServerSelector(AgentConfig config, PathSandbox sandbox)
             : _config.Lsp.Servers.FirstOrDefault(s => s.Enabled && RootMarkerOk(s) && CommandOk(s));
     }
 
-    public bool RootMarkerOk(LspServerConfig server)
-    {
-        return server.RootMarkers.Length == 0 || server.RootMarkers.Any(MarkerExists);
-    }
+    public bool RootMarkerOk(LspServerConfig server) => server.RootMarkers.Length == 0 || server.RootMarkers.Any(MarkerExists);
 
     public static bool CommandOk(LspServerConfig server) => CommandExists(server.Command);
 
