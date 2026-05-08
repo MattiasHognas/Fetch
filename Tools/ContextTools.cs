@@ -119,11 +119,26 @@ public sealed class FileRangeContextTool(FileReadRegistry registry, PathSandbox 
         var chunks = new List<string>();
         foreach (FileRangeRequest? r in ranges.Take(12))
         {
-            var path = _sandbox.Resolve(r.File);
+            var requestedFile = r.File;
+            string path;
+            try
+            {
+                path = _sandbox.Resolve(requestedFile);
+            }
+            catch
+            {
+                chunks.Add($"## {requestedFile}\n[not found]");
+                continue;
+            }
+            if (!File.Exists(path) && TryResolveByLeafName(requestedFile, out var leafResolved, out var leafRelative))
+            {
+                path = leafResolved;
+                requestedFile = leafRelative;
+            }
             _secrets.ThrowIfSensitive(path);
             if (!File.Exists(path))
             {
-                chunks.Add($"## {r.File}\n[not found]");
+                chunks.Add($"## {r.File}\n[not found - use the full repo-relative path from code_map, e.g. 'Approval/ApprovalPolicy.cs', not just the file name]");
                 continue;
             }
             var content = await File.ReadAllTextAsync(path);
@@ -147,9 +162,45 @@ public sealed class FileRangeContextTool(FileReadRegistry registry, PathSandbox 
             var start = requestedStart;
             var end = Math.Clamp(requestedEnd, start, lines.Length);
             IEnumerable<string> selected = lines.Skip(start - 1).Take(end - start + 1).Select((line, i) => $"{start + i,4}: {line}");
-            chunks.Add($"## {r.File}:{start}-{end}\n```text\n{string.Join("\n", selected)}\n```");
+            chunks.Add($"## {requestedFile}:{start}-{end}\n```text\n{string.Join("\n", selected)}\n```");
         }
         return string.Join("\n\n", chunks);
+    }
+
+    private bool TryResolveByLeafName(string requested, out string absolutePath, out string relativePath)
+    {
+        absolutePath = "";
+        relativePath = "";
+        var leaf = Path.GetFileName(requested);
+        if (string.IsNullOrWhiteSpace(leaf) || leaf != requested.Replace('\\', '/').TrimStart('/'))
+        {
+            return false;
+        }
+
+        try
+        {
+            foreach (var candidate in Directory.EnumerateFiles(_sandbox.Root, leaf, SearchOption.AllDirectories))
+            {
+                var rel = _sandbox.Relative(candidate).Replace('\\', '/');
+                if (rel.StartsWith(".git/", StringComparison.Ordinal)
+                    || rel.StartsWith(".agent/", StringComparison.Ordinal)
+                    || rel.StartsWith("bin/", StringComparison.Ordinal)
+                    || rel.StartsWith("obj/", StringComparison.Ordinal)
+                    || rel.StartsWith("node_modules/", StringComparison.Ordinal)
+                    || rel.Contains("/bin/", StringComparison.Ordinal)
+                    || rel.Contains("/obj/", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                absolutePath = candidate;
+                relativePath = rel;
+                return true;
+            }
+        }
+        catch
+        {
+        }
+        return false;
     }
 
     private static List<FileRangeRequest>? ParseRanges(string input)

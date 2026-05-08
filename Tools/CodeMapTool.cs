@@ -211,7 +211,7 @@ public sealed class CodeMapTool(
                 _ = sb.Append(string.IsNullOrEmpty(dir) ? "(root)" : dir).Append("/\n");
                 lastDir = dir;
             }
-            _ = sb.Append("  ").Append(Path.GetFileName(fs.RelativePath)).Append('\n');
+            _ = sb.Append("  ").Append(fs.RelativePath.Replace('\\', '/')).Append('\n');
             fileCount++;
 
             if (fs.Types.Count == 0 && string.IsNullOrEmpty(fs.Note))

@@ -71,12 +71,53 @@ public sealed class RelationshipMapTool(AgentConfig config, PathSandbox sandbox,
             {
                 continue;
             }
+            if (!File.Exists(absolutePath) && TryResolveByLeafName(relativePath, out var leafAbs, out var leafRel))
+            {
+                absolutePath = leafAbs;
+                relativePath = leafRel;
+            }
             if (File.Exists(absolutePath))
             {
                 files.Add(new RelationshipFileModel(relativePath, absolutePath));
             }
         }
         return files;
+    }
+
+    private bool TryResolveByLeafName(string requested, out string absolutePath, out string relativePath)
+    {
+        absolutePath = "";
+        relativePath = "";
+        var leaf = Path.GetFileName(requested);
+        if (string.IsNullOrWhiteSpace(leaf) || leaf != requested.Replace('\\', '/').TrimStart('/'))
+        {
+            return false;
+        }
+
+        try
+        {
+            foreach (var candidate in Directory.EnumerateFiles(_sandbox.Root, leaf, SearchOption.AllDirectories))
+            {
+                var rel = _sandbox.Relative(candidate).Replace('\\', '/');
+                if (rel.StartsWith(".git/", StringComparison.Ordinal)
+                    || rel.StartsWith(".agent/", StringComparison.Ordinal)
+                    || rel.StartsWith("bin/", StringComparison.Ordinal)
+                    || rel.StartsWith("obj/", StringComparison.Ordinal)
+                    || rel.StartsWith("node_modules/", StringComparison.Ordinal)
+                    || rel.Contains("/bin/", StringComparison.Ordinal)
+                    || rel.Contains("/obj/", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                absolutePath = candidate;
+                relativePath = rel;
+                return true;
+            }
+        }
+        catch
+        {
+        }
+        return false;
     }
 
     private async Task<List<RelationshipEdge>> CollectCallEdgesAsync(LspServerConfig server, List<RelationshipFileModel> files, int maxMethodsPerFile, int maxOutgoingCalls)
