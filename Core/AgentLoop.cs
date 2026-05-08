@@ -39,12 +39,12 @@ public sealed class AgentLoop
         {
             if (mutated && _config.AutoReindex)
             {
-                TriggerBackgroundReindex(_semanticIndex, _state);
+                TriggerBackgroundReindex(_semanticIndex, _state, _logger);
             }
         }
     }
 
-    public static void TriggerBackgroundReindex(SemanticIndex semanticIndex, AgentRuntimeState state)
+    public static void TriggerBackgroundReindex(SemanticIndex semanticIndex, AgentRuntimeState state, SessionLogger? logger = null)
     {
         if (Interlocked.CompareExchange(ref _reindexInFlight, 1, 0) != 0)
         {
@@ -57,8 +57,22 @@ public sealed class AgentLoop
                 _ = await semanticIndex.BuildAsync();
                 state.SemanticSearchReady = semanticIndex.Exists;
             }
-            catch
+            catch (Exception ex)
             {
+                if (logger is not null)
+                {
+                    try
+                    {
+                        await logger.LogAsync("reindex_error", new
+                        {
+                            message = ex.Message
+                        });
+                    }
+                    catch
+                    {
+                    }
+                }
+                Console.Error.WriteLine($"Background semantic reindex failed: {ex.Message}");
             }
             finally
             {

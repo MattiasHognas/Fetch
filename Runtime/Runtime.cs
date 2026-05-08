@@ -11,4 +11,5 @@ public sealed record Runtime(
     AgentRuntimeState State,
     AgentEventStore Events,
     ITool[] Tools,
-    SemanticIndex SemanticIndex);
+    SemanticIndex SemanticIndex,
+    SessionLogger Logger);

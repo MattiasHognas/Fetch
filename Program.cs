@@ -58,7 +58,7 @@ static Runtime BuildRuntime(string? sessionId, bool newSession)
 
     var agent = new AgentLoop(llm, tools, logger, todoStore, config, prompts, session, state, events, semanticIndex);
     var slash = new SlashCommandHandler(session, todoStore, llm, config, sandbox, state, tools, prompts, semanticIndex);
-    return new Runtime(session, llm, todoStore, agent, slash, config, sandbox, state, events, tools, semanticIndex);
+    return new Runtime(session, llm, todoStore, agent, slash, config, sandbox, state, events, tools, semanticIndex, logger);
 }
 
 var tuiCommand = new Command("tui", "Open terminal UI");
@@ -67,9 +67,18 @@ tuiCommand.AddOption(newSessionOption);
 tuiCommand.SetHandler((sessionId, newSession) =>
 {
     Runtime runtime = BuildRuntime(sessionId, newSession);
+    try
+    {
+        var health = new HealthChecker(runtime.Config, runtime.Sandbox).CheckAsync().GetAwaiter().GetResult();
+        Console.WriteLine(health);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Health check failed: {ex.Message}");
+    }
     if (runtime.Config.AutoReindex)
     {
-        AgentLoop.TriggerBackgroundReindex(runtime.SemanticIndex, runtime.State);
+        AgentLoop.TriggerBackgroundReindex(runtime.SemanticIndex, runtime.State, runtime.Logger);
     }
     var app = new TuiApp(runtime.Agent, runtime.Events, runtime.State, runtime.Tools);
     app.Run();
@@ -83,7 +92,7 @@ chatCommand.SetHandler(async (sessionId, newSession) =>
     Runtime runtime = BuildRuntime(sessionId, newSession);
     if (runtime.Config.AutoReindex)
     {
-        AgentLoop.TriggerBackgroundReindex(runtime.SemanticIndex, runtime.State);
+        AgentLoop.TriggerBackgroundReindex(runtime.SemanticIndex, runtime.State, runtime.Logger);
     }
     Console.WriteLine("Fetch");
     Console.WriteLine("Type a request, or /help. Type /exit to quit.");
