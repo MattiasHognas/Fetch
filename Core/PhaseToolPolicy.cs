@@ -55,7 +55,16 @@ public static class PhaseToolPolicy
         AgentPhase.Planning =>
             "Planning phase: turn evidence into a concrete todo list with todo_write. Each todo should name the tool that will satisfy it, e.g. 'Read AgentLoop.cs (read_ranges)'. Then return phaseDone.",
         AgentPhase.Editing =>
-            "Editing phase: apply focused patches (apply_diff/apply_patch) or create files. Read first, write second. Do NOT run commands or do new exploration here.",
+            "Editing phase: apply focused patches (apply_diff/apply_patch) or create files. Read first, write second. Do NOT run commands or do new exploration here.\n" +
+            "apply_diff input MUST be a raw V4A patch string. Example:\n" +
+            "*** Begin Patch\n" +
+            "*** Update File: path/to/File.cs\n" +
+            "@@\n" +
+            "-old line exactly as in file\n" +
+            "+new line\n" +
+            "*** End Patch\n" +
+            "Rules: include 1-3 unchanged context lines around each hunk; '-' lines must match the file byte-for-byte; do not wrap the patch in JSON, quotes, or markdown fences.",
+
         AgentPhase.Verification =>
             "Verification phase: run the narrowest relevant build/test/inspection via run_command and verify the change. Do NOT edit files here.",
         AgentPhase.Answering =>

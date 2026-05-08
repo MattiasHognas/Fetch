@@ -169,6 +169,17 @@ public sealed class AgentLoop
                     JsonElement root = doc.RootElement;
                     if (root.TryGetProperty("phaseDone", out JsonElement pd) && pd.ValueKind == JsonValueKind.True)
                     {
+                        if (phase is AgentPhase.Discovery && !hasGroundingEvidence)
+                        {
+                            transcript += "\nphaseDone rejected: Discovery requires at least one grounding tool result (code_map, read_ranges, search_content, symbol_search, references_search, or semantic_search) before advancing. Call one of those tools now.";
+                            await _logger.LogAsync("phase_done_rejected", new
+                            {
+                                phase = phase.ToString(),
+                                step = phaseStep,
+                                reason = "no_grounding_evidence"
+                            });
+                            continue;
+                        }
                         await _logger.LogAsync("phase_done_signal", new
                         {
                             phase = phase.ToString(),
