@@ -23,7 +23,7 @@ ollama --version
 ### Run Ollama
 Load the recommended Qwen model
 ```bash
-ollama pull qwen3:30b-a3b
+ollama pull qwen3.6:35b
 curl http://localhost:11434/api/chat -d '{
   "model": "qwen3.6:35b",
   "messages": [
