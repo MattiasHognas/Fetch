@@ -85,25 +85,68 @@ public sealed class CreateFileTool(PathSandbox sandbox, SecretPolicy secrets) : 
 {
     private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets;
 
-    public string Name => "create_file"; public string Description => "Create a file. Input: path|||content"; public ApprovalMode Approval => ApprovalMode.Ask;
+    public string Name => "create_file"; public string Description => "Create a file. Input: JSON {\"path\":\"...\",\"content\":\"...\"} or legacy 'path|||content'."; public ApprovalMode Approval => ApprovalMode.Ask;
     public async Task<string> RunAsync(string input)
     {
-        var parts = input.Split("|||", 2);
-        if (parts.Length != 2)
+        if (!TryParseInput(input, out var rawPath, out var content))
         {
-            return "Invalid input. Use path|||content";
+            return "Invalid input. Provide JSON {\"path\":\"docs/file.md\",\"content\":\"...\"} or use the legacy 'path|||content' format. Bare paths without content are not accepted.";
         }
 
-        var path = _sandbox.Resolve(parts[0].Trim());
+        var path = _sandbox.Resolve(rawPath.Trim());
         _secrets.ThrowIfSensitive(path);
         if (File.Exists(path))
         {
-            return $"File already exists: {parts[0]}";
+            return $"File already exists: {rawPath}. Use apply_diff with '*** Update File: {rawPath}' to modify it.";
         }
 
         _ = Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path, parts[1]);
-        return $"Created file: {parts[0]}";
+        await File.WriteAllTextAsync(path, content);
+        return $"Created file: {rawPath}";
+    }
+
+    private static bool TryParseInput(string input, out string path, out string content)
+    {
+        path = "";
+        content = "";
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        var trimmed = input.Trim();
+        if (trimmed.StartsWith('{'))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("path", out JsonElement pathEl)
+                    && pathEl.ValueKind == JsonValueKind.String)
+                {
+                    path = pathEl.GetString() ?? "";
+                    if (doc.RootElement.TryGetProperty("content", out JsonElement contentEl)
+                        && contentEl.ValueKind == JsonValueKind.String)
+                    {
+                        content = contentEl.GetString() ?? "";
+                    }
+                    return !string.IsNullOrWhiteSpace(path);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        var parts = input.Split("|||", 2);
+        if (parts.Length == 2 && !string.IsNullOrWhiteSpace(parts[0]))
+        {
+            path = parts[0];
+            content = parts[1];
+            return true;
+        }
+
+        return false;
     }
 }
 

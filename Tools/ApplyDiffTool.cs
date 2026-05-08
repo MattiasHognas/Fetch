@@ -271,6 +271,7 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
 
     private async Task<(bool Success, string Message)> DryRunAsync(List<PatchOperation> ops)
     {
+        PromoteMissingUpdatesToAdd(ops);
         var msgs = new List<string>();
         foreach (PatchOperation op in ops)
         {
@@ -289,7 +290,7 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
                 case PatchOperationType.UpdateFile:
                     if (!File.Exists(path))
                     {
-                        return (false, $"File not found: {op.Path}");
+                        return (false, $"File not found: {op.Path}. To create a new file, use '*** Add File: {op.Path}' (each content line prefixed with '+') instead of '*** Update File:'.");
                     }
 
                     var content = await File.ReadAllTextAsync(path);
@@ -369,6 +370,31 @@ public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox
                 break;
         }
     }
+    private static void PromoteMissingUpdatesToAdd(List<PatchOperation> ops)
+    {
+        for (var i = 0; i < ops.Count; i++)
+        {
+            PatchOperation op = ops[i];
+            if (op.Type != PatchOperationType.UpdateFile)
+            {
+                continue;
+            }
+
+            if (File.Exists(op.Path))
+            {
+                continue;
+            }
+
+            List<PatchHunk> hunks = op.Hunks ?? [];
+            if (hunks.Count != 1 || !string.IsNullOrEmpty(hunks[0].OldText))
+            {
+                continue;
+            }
+
+            ops[i] = new PatchOperation(PatchOperationType.AddFile, op.Path, hunks[0].NewText);
+        }
+    }
+
     private static int Count(string haystack, string needle)
     {
         var count = 0;
