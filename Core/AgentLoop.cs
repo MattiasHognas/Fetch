@@ -4,8 +4,11 @@ namespace Fetch.Core;
 
 public sealed class AgentLoop
 {
-    private readonly LlmClient _llm; private readonly Dictionary<string, ITool> _tools; private readonly SessionLogger _logger; private readonly TodoStore _todoStore; private readonly AgentConfig _config; private readonly PromptCatalog _prompts; private readonly AgentSession _session; private readonly AgentRuntimeState _state; private readonly AgentEventStore _events; private readonly TaskPlanner _planner; private readonly ToolRouter _router; private readonly CommandResultAnalyzer _analyzer; private readonly TranscriptCompactor _compactor; private readonly ApprovalPolicy _approvalPolicy; private readonly string? _agentMd;
-    public AgentLoop(LlmClient llm, IEnumerable<ITool> tools, SessionLogger logger, TodoStore todoStore, AgentConfig config, PromptCatalog prompts, AgentSession session, AgentRuntimeState state, AgentEventStore events)
+    private readonly LlmClient _llm; private readonly Dictionary<string, ITool> _tools; private readonly SessionLogger _logger; private readonly TodoStore _todoStore; private readonly AgentConfig _config; private readonly PromptCatalog _prompts; private readonly AgentSession _session; private readonly AgentRuntimeState _state; private readonly AgentEventStore _events; private readonly SemanticIndex _semanticIndex; private readonly TaskPlanner _planner; private readonly ToolRouter _router; private readonly CommandResultAnalyzer _analyzer; private readonly TranscriptCompactor _compactor; private readonly ApprovalPolicy _approvalPolicy; private readonly string? _agentMd;
+    private static readonly HashSet<string> MutationToolNames = new(StringComparer.Ordinal) { "apply_diff", "apply_patch", "create_file", "delete_file", "rename_file" };
+    private static int _reindexInFlight;
+
+    public AgentLoop(LlmClient llm, IEnumerable<ITool> tools, SessionLogger logger, TodoStore todoStore, AgentConfig config, PromptCatalog prompts, AgentSession session, AgentRuntimeState state, AgentEventStore events, SemanticIndex semanticIndex)
     {
         _llm = llm;
         _tools = tools.ToDictionary(t => t.Name);
@@ -16,6 +19,7 @@ public sealed class AgentLoop
         _session = session;
         _state = state;
         _events = events;
+        _semanticIndex = semanticIndex;
         _planner = new TaskPlanner(llm, prompts);
         _router = new ToolRouter(llm, prompts);
         _analyzer = new CommandResultAnalyzer(llm, prompts);
@@ -25,6 +29,45 @@ public sealed class AgentLoop
     }
 
     public async Task RunAsync(string task)
+    {
+        var mutated = false;
+        try
+        {
+            await RunInnerAsync(task, m => mutated = mutated || m);
+        }
+        finally
+        {
+            if (mutated && _config.AutoReindex)
+            {
+                TriggerBackgroundReindex(_semanticIndex, _state);
+            }
+        }
+    }
+
+    public static void TriggerBackgroundReindex(SemanticIndex semanticIndex, AgentRuntimeState state)
+    {
+        if (Interlocked.CompareExchange(ref _reindexInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                _ = await semanticIndex.BuildAsync();
+                state.SemanticSearchReady = semanticIndex.Exists;
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _ = Interlocked.Exchange(ref _reindexInFlight, 0);
+            }
+        });
+    }
+
+    private async Task RunInnerAsync(string task, Action<bool> reportMutation)
     {
         _events.Add(AgentEventType.UserInput, "User", task);
         await _logger.LogAsync("user_task", new
@@ -201,6 +244,10 @@ public sealed class AgentLoop
                 TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
                 if (_state.LastTool is { IsError: false })
                 {
+                    if (MutationToolNames.Contains(toolName))
+                    {
+                        reportMutation(true);
+                    }
                     await AdvanceTodoProgressAsync(toolName);
                     if (await TryCompleteRunAsync(task, toolName, input, result))
                     {
@@ -681,12 +728,7 @@ public sealed class AgentLoop
     private static bool TryBlockWrongDocumentationWrite(string toolName, string input, TaskKind taskKind, out string failure)
     {
         failure = "";
-        if (taskKind is not (TaskKind.ArchitectureDocs or TaskKind.Documentation))
-        {
-            return false;
-        }
-
-        return toolName switch
+        return taskKind is TaskKind.ArchitectureDocs or TaskKind.Documentation && toolName switch
         {
             "create_file" when TryGetCreateFilePath(input, out var createPath) && !IsDocumentationPath(createPath)
                 => FailDocumentationWrite("Architecture/documentation tasks must write a markdown file under docs/ such as docs/ARCHITECTURE.md. Do not modify source files for this step.", out failure),

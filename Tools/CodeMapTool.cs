@@ -6,8 +6,8 @@ namespace Fetch.Tools;
 
 /// <summary>
 /// Returns a compact, line-budgeted map of the repo: directory -> file -> top-level types -> public members.
-/// Hybrid: tries LSP <c>textDocument/documentSymbol</c> when an LSP server is available for a file's language;
-/// falls back to language-aware regex extraction otherwise.
+/// Uses LSP <c>textDocument/documentSymbol</c> for every supported language; files whose language has no
+/// configured LSP server are listed without symbol detail.
 /// Designed to be the FIRST tool called for architecture / overview / refactor-planning tasks so the agent
 /// does not waste its step budget walking <c>repo_tree</c> and reading random files.
 /// </summary>
@@ -49,12 +49,15 @@ public sealed class CodeMapTool(
         var lspExtractor = new LspDocumentSymbolExtractor(_config, _sandbox, _lspSelector);
         try
         {
-            // Try LSP per language; if LSP unavailable for a language, all its files fall through to regex.
             foreach ((var language, List<FileSymbols> group) in byLanguage)
             {
                 LspServerConfig? server = lspExtractor.SelectServerForLanguage(language);
                 if (server is null)
                 {
+                    foreach (FileSymbols fs in group)
+                    {
+                        fs.Note = $"no LSP server configured for {language}";
+                    }
                     continue;
                 }
 
@@ -63,27 +66,21 @@ public sealed class CodeMapTool(
                 {
                     await lspExtractor.PopulateAsync(server, group, lspCts.Token);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // LSP failed for this language: leave its files for regex fallback.
+                    foreach (FileSymbols fs in group)
+                    {
+                        if (fs.Types.Count == 0 && string.IsNullOrEmpty(fs.Note))
+                        {
+                            fs.Note = $"LSP {server.Id} failed: {ex.Message}";
+                        }
+                    }
                 }
             }
         }
         finally
         {
             await lspExtractor.DisposeAsync();
-        }
-
-        // Regex fallback for anything still empty.
-        foreach (List<FileSymbols> group in byLanguage.Values)
-        {
-            foreach (FileSymbols fs in group)
-            {
-                if (fs.Types.Count == 0)
-                {
-                    RegexSymbolExtractor.Populate(fs, _sandbox);
-                }
-            }
         }
 
         return Render(byLanguage.Values.SelectMany(g => g).OrderBy(f => f.RelativePath, StringComparer.Ordinal));
@@ -134,7 +131,6 @@ public sealed class CodeMapTool(
 
     private static bool GlobMatch(string glob, string name)
     {
-        // Simple *,? glob.
         var pattern = "^" + Regex.Escape(glob).Replace("\\*", ".*").Replace("\\?", ".") + "$";
         return Regex.IsMatch(name, pattern, RegexOptions.IgnoreCase);
     }
@@ -333,7 +329,7 @@ internal sealed class LspDocumentSymbolExtractor(AgentConfig config, PathSandbox
             }
             catch
             {
-                // Leave fs.Types empty; regex fallback will fill in.
+                // Leave fs.Types empty; the file will appear without symbol detail.
             }
         }
     }
@@ -481,186 +477,5 @@ internal sealed class LspDocumentSymbolExtractor(AgentConfig config, PathSandbox
             catch { }
         }
         _clients.Clear();
-    }
-}
-
-internal static partial class RegexSymbolExtractor
-{
-    public static void Populate(FileSymbols fs, PathSandbox sandbox)
-    {
-        var path = sandbox.Resolve(fs.RelativePath);
-        if (!File.Exists(path))
-        {
-            return;
-        }
-        string text;
-        try
-        {
-            text = File.ReadAllText(path);
-        }
-        catch
-        {
-            return;
-        }
-
-        var ext = Path.GetExtension(fs.RelativePath).ToLowerInvariant();
-        switch (ext)
-        {
-            case ".cs":
-                ExtractCSharp(fs, text);
-                break;
-            case ".ts":
-            case ".tsx":
-            case ".js":
-            case ".jsx":
-                ExtractTypeScript(fs, text);
-                break;
-            case ".py":
-                ExtractPython(fs, text);
-                break;
-            case ".go":
-                ExtractGo(fs, text);
-                break;
-            case ".rs":
-                ExtractRust(fs, text);
-                break;
-            case ".java":
-            case ".kt":
-                ExtractJava(fs, text);
-                break;
-            default:
-                fs.Note = "no extractor";
-                break;
-        }
-    }
-
-    [GeneratedRegex(@"^\s*(?:public|internal|protected|private)?\s*(?:static\s+|sealed\s+|abstract\s+|partial\s+|readonly\s+)*\s*(class|struct|interface|enum|record)\s+([A-Za-z_][A-Za-z_0-9]*)(?:\s*<[^>]*>)?(?:\s*\(([^)]*)\))?(?:\s*:\s*([^{]+?))?\s*(?:\{|where|$)", RegexOptions.Multiline)]
-    private static partial Regex CsTypeRx();
-    [GeneratedRegex(@"^\s*public\s+(?:static\s+|virtual\s+|override\s+|sealed\s+|async\s+|partial\s+|readonly\s+|new\s+)*[A-Za-z_<>?\[\],\s\.]+?\s+([A-Za-z_][A-Za-z_0-9]*)\s*(?:[\(<{=]|=>)", RegexOptions.Multiline)]
-    private static partial Regex CsMemberRx();
-
-    private static void ExtractCSharp(FileSymbols fs, string text)
-    {
-        foreach (Match m in CsTypeRx().Matches(text))
-        {
-            var kind = m.Groups[1].Value;
-            var name = m.Groups[2].Value;
-            var baseList = m.Groups[4].Success ? m.Groups[4].Value.Trim() : "";
-            fs.Types.Add(new TypeSymbol(kind, name) { BaseList = baseList });
-        }
-        // Naive: treat all public members as belonging to the last-declared type (best effort for regex fallback).
-        TypeSymbol? current = fs.Types.LastOrDefault();
-        if (current is null)
-        {
-            return;
-        }
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (Match m in CsMemberRx().Matches(text))
-        {
-            var name = m.Groups[1].Value;
-            if (seen.Add(name) && !LooksLikeType(name, fs))
-            {
-                current.Members.Add(name);
-            }
-        }
-    }
-
-    private static bool LooksLikeType(string name, FileSymbols fs) =>
-        fs.Types.Any(t => string.Equals(t.Name, name, StringComparison.Ordinal));
-
-    [GeneratedRegex(@"^\s*export\s+(?:default\s+)?(?:abstract\s+)?(class|interface|enum|type)\s+([A-Za-z_][A-Za-z_0-9]*)", RegexOptions.Multiline)]
-    private static partial Regex TsTypeRx();
-    [GeneratedRegex(@"^\s*export\s+(?:async\s+)?function\s+([A-Za-z_][A-Za-z_0-9]*)", RegexOptions.Multiline)]
-    private static partial Regex TsFuncRx();
-
-    private static void ExtractTypeScript(FileSymbols fs, string text)
-    {
-        foreach (Match m in TsTypeRx().Matches(text))
-        {
-            fs.Types.Add(new TypeSymbol(m.Groups[1].Value, m.Groups[2].Value));
-        }
-        foreach (Match m in TsFuncRx().Matches(text))
-        {
-            fs.Types.Add(new TypeSymbol("function", m.Groups[1].Value));
-        }
-    }
-
-    [GeneratedRegex(@"^\s*class\s+([A-Za-z_][A-Za-z_0-9]*)\s*(?:\(([^)]*)\))?:", RegexOptions.Multiline)]
-    private static partial Regex PyClassRx();
-    [GeneratedRegex(@"^(\s*)def\s+([A-Za-z_][A-Za-z_0-9]*)", RegexOptions.Multiline)]
-    private static partial Regex PyDefRx();
-
-    private static void ExtractPython(FileSymbols fs, string text)
-    {
-        foreach (Match m in PyClassRx().Matches(text))
-        {
-            var bases = m.Groups[2].Success ? m.Groups[2].Value.Trim() : "";
-            fs.Types.Add(new TypeSymbol("class", m.Groups[1].Value) { BaseList = bases });
-        }
-        foreach (Match m in PyDefRx().Matches(text))
-        {
-            if (m.Groups[1].Length == 0)
-            {
-                fs.Types.Add(new TypeSymbol("def", m.Groups[2].Value));
-            }
-        }
-    }
-
-    [GeneratedRegex(@"^type\s+([A-Za-z_][A-Za-z_0-9]*)\s+(struct|interface)\b", RegexOptions.Multiline)]
-    private static partial Regex GoTypeRx();
-    [GeneratedRegex(@"^func\s+(?:\(\s*[A-Za-z_][A-Za-z_0-9]*\s+\*?([A-Za-z_][A-Za-z_0-9]*)\s*\)\s+)?([A-Z][A-Za-z_0-9]*)", RegexOptions.Multiline)]
-    private static partial Regex GoFuncRx();
-
-    private static void ExtractGo(FileSymbols fs, string text)
-    {
-        foreach (Match m in GoTypeRx().Matches(text))
-        {
-            fs.Types.Add(new TypeSymbol(m.Groups[2].Value, m.Groups[1].Value));
-        }
-        foreach (Match m in GoFuncRx().Matches(text))
-        {
-            var receiver = m.Groups[1].Success ? m.Groups[1].Value : "";
-            var name = m.Groups[2].Value;
-            if (string.IsNullOrEmpty(receiver))
-            {
-                fs.Types.Add(new TypeSymbol("func", name));
-            }
-            else
-            {
-                TypeSymbol? owner = fs.Types.FirstOrDefault(t => string.Equals(t.Name, receiver, StringComparison.Ordinal));
-                owner?.Members.Add(name);
-            }
-        }
-    }
-
-    [GeneratedRegex(@"^(?:pub\s+)?(struct|enum|trait|impl)\s+([A-Za-z_][A-Za-z_0-9]*)", RegexOptions.Multiline)]
-    private static partial Regex RustTypeRx();
-    [GeneratedRegex(@"^(\s*)pub\s+(?:async\s+)?fn\s+([A-Za-z_][A-Za-z_0-9]*)", RegexOptions.Multiline)]
-    private static partial Regex RustFnRx();
-
-    private static void ExtractRust(FileSymbols fs, string text)
-    {
-        foreach (Match m in RustTypeRx().Matches(text))
-        {
-            fs.Types.Add(new TypeSymbol(m.Groups[1].Value, m.Groups[2].Value));
-        }
-        foreach (Match m in RustFnRx().Matches(text))
-        {
-            if (m.Groups[1].Length == 0)
-            {
-                fs.Types.Add(new TypeSymbol("fn", m.Groups[2].Value));
-            }
-        }
-    }
-
-    [GeneratedRegex(@"^\s*(?:public\s+|private\s+|protected\s+|abstract\s+|final\s+|sealed\s+|static\s+|open\s+)*(class|interface|enum|object)\s+([A-Za-z_][A-Za-z_0-9]*)", RegexOptions.Multiline)]
-    private static partial Regex JavaTypeRx();
-
-    private static void ExtractJava(FileSymbols fs, string text)
-    {
-        foreach (Match m in JavaTypeRx().Matches(text))
-        {
-            fs.Types.Add(new TypeSymbol(m.Groups[1].Value, m.Groups[2].Value));
-        }
     }
 }

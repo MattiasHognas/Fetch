@@ -16,6 +16,7 @@ public sealed class AgentConfig
     public int MaxFailedCommandAttempts { get; set; } = 4;
     public bool AutoBuildSemanticIndexOnAgentRun { get; set; } = true;
     public int SemanticIndexBuildTimeoutSeconds { get; set; } = 30;
+    public bool AutoReindex { get; set; } = true;
     public int DefaultCommandTimeoutSeconds { get; set; } = 60;
     public int MaxCommandTimeoutSeconds { get; set; } = 600;
     public int MaxToolResultChars { get; set; } = 12000;
