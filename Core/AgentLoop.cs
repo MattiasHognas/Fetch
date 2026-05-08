@@ -323,6 +323,10 @@ public sealed class AgentLoop
                         {
                             AgentPhase.Discovery => hasGroundingEvidence,
                             AgentPhase.Editing => phaseHadSuccessfulMutation,
+                            AgentPhase.Triage => throw new NotImplementedException(),
+                            AgentPhase.Planning => throw new NotImplementedException(),
+                            AgentPhase.Verification => throw new NotImplementedException(),
+                            AgentPhase.Answering => throw new NotImplementedException(),
                             _ => true
                         };
                         if (canAdvancePhase && !isLastPhase)
@@ -404,6 +408,18 @@ public sealed class AgentLoop
                 globalStep
             });
             await AdvancePhaseTodoAsync(phase);
+            if (phase is AgentPhase.Editing && !phaseHadSuccessfulMutation)
+            {
+                var blocker = "Blocked: Editing phase ended without applying any file changes. The agent must call apply_diff (or another mutation tool) successfully before advancing. Re-run the task or refine the prompt.";
+                _events.Add(AgentEventType.Final, "Final", blocker);
+                await _logger.LogAsync("final", new
+                {
+                    text = blocker,
+                    reason = "editing_no_mutation"
+                });
+                Console.WriteLine(blocker);
+                return;
+            }
             if (globalStep >= _config.MaxAgentSteps)
             {
                 break;
@@ -890,6 +906,7 @@ public sealed class AgentLoop
             || result.StartsWith("Tool failed:", StringComparison.OrdinalIgnoreCase)
             || result.Contains("Denied by approval policy", StringComparison.OrdinalIgnoreCase)
             || result.Contains("Approval denied.", StringComparison.OrdinalIgnoreCase)
+            || result.Contains("Blocked by command policy.", StringComparison.Ordinal)
             || result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase))
         {
             _ = failedToolCalls.Add(key);

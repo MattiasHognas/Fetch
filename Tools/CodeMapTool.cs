@@ -88,13 +88,7 @@ public sealed class CodeMapTool(
 
     private List<string> SelectFiles(string? scopePath, string? includeGlob)
     {
-        var rootPath = string.IsNullOrWhiteSpace(scopePath)
-            ? _sandbox.Root
-            : _sandbox.Resolve(scopePath);
-        if (!Directory.Exists(rootPath))
-        {
-            return [];
-        }
+        var rootPath = ResolveScopeRoot(scopePath);
 
         Func<string, bool> matchesGlob = string.IsNullOrWhiteSpace(includeGlob)
             ? IsIndexable
@@ -120,6 +114,24 @@ public sealed class CodeMapTool(
         }
         files.Sort(StringComparer.Ordinal);
         return files;
+    }
+
+    private string ResolveScopeRoot(string? scopePath)
+    {
+        if (string.IsNullOrWhiteSpace(scopePath))
+        {
+            return _sandbox.Root;
+        }
+
+        try
+        {
+            var resolved = _sandbox.Resolve(scopePath);
+            return Directory.Exists(resolved) ? resolved : _sandbox.Root;
+        }
+        catch
+        {
+            return _sandbox.Root;
+        }
     }
 
     private static bool IsIndexable(string path)
@@ -412,7 +424,7 @@ internal sealed class LspDocumentSymbolExtractor(AgentConfig config, PathSandbox
             return;
         }
 
-        if (IsTypeKind(kindNum) && depth == 0)
+        if (IsTypeKind(kindNum))
         {
             var type = new TypeSymbol(kindName, name);
             fs.Types.Add(type);
@@ -429,6 +441,10 @@ internal sealed class LspDocumentSymbolExtractor(AgentConfig config, PathSandbox
                     if (IsMemberKind(cKind))
                     {
                         type.Members.Add(cName);
+                    }
+                    else if (IsTypeKind(cKind))
+                    {
+                        AddHierarchical(child, fs, depth + 1);
                     }
                 }
             }
@@ -451,14 +467,16 @@ internal sealed class LspDocumentSymbolExtractor(AgentConfig config, PathSandbox
             return;
         }
         var container = sym.TryGetProperty("containerName", out JsonElement c) ? c.GetString() ?? "" : "";
-        if (IsTypeKind(kindNum) && string.IsNullOrEmpty(container))
+        if (IsTypeKind(kindNum))
         {
             var kindName = KindNames.TryGetValue(kindNum, out var kn) ? kn : "symbol";
             fs.Types.Add(new TypeSymbol(kindName, name));
         }
         else if (IsMemberKind(kindNum) && !string.IsNullOrEmpty(container))
         {
-            TypeSymbol? owner = fs.Types.FirstOrDefault(t => string.Equals(t.Name, container, StringComparison.Ordinal));
+            var simpleContainer = container.Contains('.') ? container[(container.LastIndexOf('.') + 1)..] : container;
+            TypeSymbol? owner = fs.Types.FirstOrDefault(t => string.Equals(t.Name, container, StringComparison.Ordinal))
+                ?? fs.Types.FirstOrDefault(t => string.Equals(t.Name, simpleContainer, StringComparison.Ordinal));
             owner?.Members.Add(name);
         }
     }
