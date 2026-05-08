@@ -66,7 +66,7 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
         return toolName switch
         {
             "apply_diff" when phase == AgentPhase.Editing
-                => "Provide a real *** Begin Patch payload for the target file. Do not return prose or a router suggestion.",
+                => "apply_diff input MUST be a raw V4A patch string (no JSON, no quotes, no fences). Example: '*** Begin Patch\\n*** Update File: path.cs\\n@@\\n-old\\n+new\\n*** End Patch'. Each '-' line must match the file byte-for-byte; include 1-3 unchanged context lines around each hunk.",
             "read_file" => "Read the concrete file produced or needed by the current step.",
             "relationship_map" => "Provide JSON like {\"files\":[\"Program.cs\",\"Core/AgentLoop.cs\"]} using files already discovered from code_map/read_ranges.",
             "run_command" => "Run the narrowest relevant build, test, or verification command for the changed slice.",

@@ -263,6 +263,18 @@ public sealed class AgentLoop
                         });
                         continue;
                     }
+                    if (toolName is "apply_diff" or "apply_patch" && IsJsonObjectInput(input))
+                    {
+                        transcript += "\napply_diff/apply_patch input must be a raw V4A patch string starting with '*** Begin Patch', not a JSON object. Example:\n*** Begin Patch\n*** Update File: path/file.cs\n@@\n- old line\n+ new line\n*** End Patch\nRead the file first to copy the exact '-' line text, then retry.";
+                        await _logger.LogAsync("error", new
+                        {
+                            phase = phase.ToString(),
+                            step = phaseStep,
+                            kind = "diff_input_shape",
+                            tool = toolName
+                        });
+                        continue;
+                    }
                     _events.Add(AgentEventType.ToolCall, $"Tool call: {toolName}", input, toolName, input);
                     await _logger.LogAsync("tool_call", new
                     {
@@ -570,7 +582,7 @@ public sealed class AgentLoop
             "apply_diff" when result.StartsWith("Patch failed.", StringComparison.OrdinalIgnoreCase)
                 => "Do not return final yet. Read the relevant file or confirm it does not exist, then retry apply_diff with a full patch beginning with *** Begin Patch.",
             "apply_diff" when result.StartsWith("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
-                => "Retry apply_diff with a real patch, for example: *** Begin Patch\n*** Add File: docs/ARCHITECTURE.md\n+# Architecture\n*** End Patch. Do not use path|||content or +path|||... pseudo-patches.",
+                => "apply_diff requires a raw V4A patch string, NOT a JSON object. Do not use {\"file\":...,\"search\":...,\"replaceWith\":...}. Correct example for an in-place edit:\n*** Begin Patch\n*** Update File: Core/AgentLoop.cs\n@@\n- var phaseStep = 0;\n+ var stepInPhase = 0;\n*** End Patch\nThe '-' line must match the existing file byte-for-byte. Read the file first to get the exact line text, then retry with a real patch.",
             "apply_patch" when result.StartsWith("Invalid input.", StringComparison.OrdinalIgnoreCase)
                 || result.StartsWith("File not found:", StringComparison.OrdinalIgnoreCase)
                 || result.StartsWith("Old text not found.", StringComparison.OrdinalIgnoreCase)
@@ -587,6 +599,16 @@ public sealed class AgentLoop
                 => "Do not repeat the same failing tool call. Choose a different tool or different input that addresses the error. If the failure was on a write, switch back to a search/read tool next.",
             _ => null
         };
+    }
+
+    private static bool IsJsonObjectInput(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+        var trimmed = input.TrimStart();
+        return trimmed.Length > 0 && trimmed[0] == '{';
     }
 
     private static string ReadJsonValue(JsonElement value)
