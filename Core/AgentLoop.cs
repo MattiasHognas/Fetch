@@ -319,6 +319,26 @@ public sealed class AgentLoop
                         : 0;
                     if (repeatedBlockedToolCalls >= 3)
                     {
+                        var canAdvancePhase = phase switch
+                        {
+                            AgentPhase.Discovery => hasGroundingEvidence,
+                            AgentPhase.Editing => phaseHadSuccessfulMutation,
+                            _ => true
+                        };
+                        if (canAdvancePhase && !isLastPhase)
+                        {
+                            await _logger.LogAsync("phase_force_advance", new
+                            {
+                                phase = phase.ToString(),
+                                step = phaseStep,
+                                reason = "repeated_blocked_tool_calls",
+                                tool = toolName
+                            });
+                            transcript += $"\nPhase {phase} force-advanced after repeated blocked {toolName} calls; existing evidence is sufficient to continue.";
+                            phaseDone = true;
+                            break;
+                        }
+
                         var blocker = $"Blocked: the agent is repeatedly retrying {toolName} with the same input after explicit loop-prevention errors. It must switch to a different tool or query instead of continuing this run.";
                         _events.Add(AgentEventType.Final, "Final", blocker);
                         await _logger.LogAsync("final", new
