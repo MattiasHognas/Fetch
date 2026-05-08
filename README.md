@@ -21,16 +21,26 @@ ollama --version
 ```
 
 ### Run Ollama
-Load coder model
+Load the recommended Qwen model
 ```bash
-ollama pull deepseek-coder-v2:16b
-curl http://localhost:11434/api/generate -d '{
-  "model": "deepseek-coder-v2:16b",
-  "prompt": "ping",
+ollama pull qwen3.6:35b
+curl http://localhost:11434/api/chat -d '{
+  "model": "qwen3.6:35b",
+  "messages": [
+    { "role": "user", "content": "ping" }
+  ],
   "stream": false,
-  "keep_alive": -1
+  "think": true,
+  "options": {
+    "num_ctx": 100000,
+    "temperature": 0
+  }
 }'
 ```
+For native tool calling, pass a `tools` array to `/api/chat` and consume `message.tool_calls` plus `message.thinking` from the response.
+
+Ollama tag names do not always match upstream Qwen naming exactly; check the installed Ollama tags before changing `ModelName`.
+
 Load embedding model
 ```bash
 ollama pull nomic-embed-text:latest
@@ -56,6 +66,8 @@ Fallback CLI:
 dotnet run -- chat
 dotnet run -- agent "fix failing tests"
 ```
+
+The default config now targets chat completions with Qwen, native tool calling, reasoning preservation, and a 100k context window. Keep the larger tool/context limits if you want the agent to benefit from that wider context.
 
 Useful slash commands in chat mode:
 

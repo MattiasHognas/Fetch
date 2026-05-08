@@ -6,9 +6,14 @@ public sealed class AgentConfig
 {
     public string ConfigPath { get; set; } = "";
     public string ModelBaseUrl { get; set; } = "http://localhost:11434";
-    public string ModelName { get; set; } = "deepseek-coder-v2:16b";
-    public int ContextWindowTokens { get; set; } = 16384;
-    public int ContextWindowReserveTokens { get; set; } = 2048;
+    public string ModelName { get; set; } = "qwen3.6:35b";
+    public string ModelTransport { get; set; } = "chat";
+    public bool EnableNativeToolCalls { get; set; } = true;
+    public bool PreserveReasoning { get; set; } = true;
+    public bool? ProviderPreserveThinking { get; set; }
+    public double Temperature { get; set; }
+    public int ContextWindowTokens { get; set; } = 100000;
+    public int ContextWindowReserveTokens { get; set; } = 8192;
     public string EmbeddingBaseUrl { get; set; } = "http://localhost:11434";
     public string EmbeddingModel { get; set; } = "nomic-embed-text";
     public string ApprovalMode { get; set; } = "ask";
@@ -22,10 +27,12 @@ public sealed class AgentConfig
     public bool AutoReindex { get; set; } = true;
     public int DefaultCommandTimeoutSeconds { get; set; } = 60;
     public int MaxCommandTimeoutSeconds { get; set; } = 600;
-    public int MaxToolResultChars { get; set; } = 12000;
-    public int MaxContextPackFiles { get; set; } = 8;
-    public int MaxContextPackTotalChars { get; set; } = 40000;
-    public int MaxContextPackFileChars { get; set; } = 10000;
+    public int MaxToolResultChars { get; set; } = 40000;
+    public int MaxRecentStateChars { get; set; } = 24000;
+    public int MaxRoutingTranscriptChars { get; set; } = 40000;
+    public int MaxContextPackFiles { get; set; } = 12;
+    public int MaxContextPackTotalChars { get; set; } = 80000;
+    public int MaxContextPackFileChars { get; set; } = 20000;
     public int ChunkMaxChars { get; set; } = 2500;
     public int ChunkOverlapChars { get; set; } = 300;
     public int SemanticSearchTopK { get; set; } = 8;

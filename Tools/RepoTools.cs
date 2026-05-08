@@ -78,9 +78,10 @@ public sealed class SearchTool(RepoMap repo) : ITool
     }
 }
 
-public sealed class SearchContentTool(PathSandbox sandbox) : ITool
+public sealed class SearchContentTool(PathSandbox sandbox, AgentConfig config) : ITool
 {
     private readonly PathSandbox _sandbox = sandbox;
+    private readonly AgentConfig _config = config;
 
     public string Name => "search_content"; public string Description => "Search file contents using ripgrep. Input: search term or regex."; public ApprovalMode Approval => ApprovalMode.Auto;
     public async Task<string> RunAsync(string input)
@@ -111,7 +112,7 @@ public sealed class SearchContentTool(PathSandbox sandbox) : ITool
         var error = await p.StandardError.ReadToEndAsync();
         await p.WaitForExitAsync();
         var text = string.IsNullOrWhiteSpace(output) ? error : output;
-        return text.Length > 12000 ? text[..12000] + "\n[truncated]" : text;
+        return text.Length > _config.MaxToolResultChars ? text[.._config.MaxToolResultChars] + "\n[truncated]" : text;
     }
     private static bool CommandExists(string command) => (Environment.GetEnvironmentVariable("PATH")?.Split(Path.PathSeparator) ?? []).Any(p => File.Exists(Path.Combine(p, OperatingSystem.IsWindows() ? command + ".exe" : command)));
 }

@@ -22,7 +22,7 @@ public sealed partial class AgentLoop
         _events = events;
         _semanticIndex = semanticIndex;
         _triage = triage;
-        _router = new ToolRouter(llm, prompts);
+        _router = new ToolRouter(llm, prompts, config);
         _analyzer = new CommandResultAnalyzer(llm, prompts);
         _compactor = new TranscriptCompactor(llm, prompts);
         _approvalPolicy = new ApprovalPolicy(config);
@@ -34,7 +34,7 @@ public sealed partial class AgentLoop
         var mutated = false;
         try
         {
-            await RunInnerAsync(task, m => mutated = mutated || m);
+            await (_llm.SupportsNativeToolCalling ? RunNativeAsync(task, m => mutated = mutated || m) : RunInnerAsync(task, m => mutated = mutated || m));
         }
         finally
         {
@@ -1167,8 +1167,8 @@ public sealed partial class AgentLoop
     private string BuildPhasePrompt(string task, TriageResult triage, AgentPhase phase, string priorTranscript)
     {
         var recentState = string.IsNullOrWhiteSpace(priorTranscript)
-            ? (string.IsNullOrWhiteSpace(_session.ReadSummary()) ? "(none)" : Trim(_session.ReadSummary(), 4000))
-            : Trim(priorTranscript, 4000);
+            ? (string.IsNullOrWhiteSpace(_session.ReadSummary()) ? "(none)" : Trim(_session.ReadSummary(), _config.MaxRecentStateChars))
+            : Trim(priorTranscript, _config.MaxRecentStateChars);
         var thinkingHint = _config.EnableThinking && LlmClient.IsThinkingModel(_config.ModelName)
             ? "\nUse step-by-step thinking (<think>...</think>) before emitting the JSON. The <think> block will be stripped before parsing.\n"
             : "";

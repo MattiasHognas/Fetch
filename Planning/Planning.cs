@@ -2,9 +2,9 @@ using System.Text.Json;
 
 namespace Fetch.Planning;
 
-public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
+public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts, AgentConfig config)
 {
-    private readonly LlmClient _llm = llm; private readonly PromptCatalog _prompts = prompts;
+    private readonly LlmClient _llm = llm; private readonly PromptCatalog _prompts = prompts; private readonly AgentConfig _config = config;
 
     public Task<string> ChooseAsync(string task, string transcript, IEnumerable<ITool> tools, bool semanticSearchReady, AgentPhase phase, string currentTodo, string completedTodos)
     {
@@ -75,7 +75,7 @@ public sealed class ToolRouter(LlmClient llm, PromptCatalog prompts)
         };
     }
 
-    private static string Trim(string t) => t.Length <= 12000 ? t : t[^12000..];
+    private string Trim(string t) => t.Length <= _config.MaxRoutingTranscriptChars ? t : t[^_config.MaxRoutingTranscriptChars..];
 }
 
 public sealed class CommandResultAnalyzer(LlmClient llm, PromptCatalog prompts)
