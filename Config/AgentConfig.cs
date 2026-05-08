@@ -14,6 +14,9 @@ public sealed class AgentConfig
     public string ApprovalMode { get; set; } = "ask";
     public int MaxAgentSteps { get; set; } = 24;
     public int MaxFailedCommandAttempts { get; set; } = 4;
+    public bool EnableThinking { get; set; } = true;
+    public int MaxTriageTokens { get; set; } = 512;
+    public int MaxStepsPerPhase { get; set; } = 8;
     public bool AutoBuildSemanticIndexOnAgentRun { get; set; } = true;
     public int SemanticIndexBuildTimeoutSeconds { get; set; } = 30;
     public bool AutoReindex { get; set; } = true;

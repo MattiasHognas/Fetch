@@ -92,17 +92,54 @@ Hard rules:
 Available tools:
 {{tools}}
 """,
-            [PromptId.PlannerCreate] = """
-Refine the goal statement for a coding agent. The execution steps are FIXED by the playbook below; you do not need to invent them.
-Return ONLY JSON: {"goal":"short concrete goal","risk":"low|medium|high","needsTestLoop":true,"firstToolHint":"{{required_first_tool}}"}
-Task kind: {{task_kind}}
-Playbook hint: {{playbook_hint}}
-Playbook steps:
-{{playbook_steps}}
+            [PromptId.Triage] = """
+You are the triage step of a small-context coding agent. Pick the task kind and the ordered list of phases the agent should run. Keep it minimal.
+
+Allowed kinds: Question | ArchitectureDocs | Documentation | BugFix | Refactor | Feature | Greenfield | Generic
+Allowed phases: Discovery | Planning | Editing | Verification | Answering
+
+Phase guidance:
+- Question -> [Discovery, Answering]
+- ArchitectureDocs / Documentation about THIS repo -> [Discovery, Editing, Verification]
+- BugFix / Refactor -> [Discovery, Planning, Editing, Verification]
+- Feature in EXISTING code -> [Discovery, Planning, Editing, Verification]
+- Greenfield (no relevant existing code, isGreenfield=true) -> [Planning, Editing, Verification]
+- Pure docs/no-code answer with no edits -> [Discovery, Answering]
+
+Return ONLY JSON, no prose, no fences:
+{"kind":"...","phases":["...","..."],"isGreenfield":false,"goal":"one short sentence","needsTests":true}
+
+Repo snapshot:
+{{repo_snapshot}}
+
 Project instructions:
 {{agent_md}}
+
 Task:
 {{task}}
+""",
+            [PromptId.PhaseAgent] = """
+You are a local coding agent in the {{phase}} phase.
+
+{{phase_hint}}
+
+Task: {{task}}
+Goal: {{goal}}
+Current todo: {{current_todo}}
+Completed todos: {{completed_todos}}
+
+Hard rules:
+- Return ONLY one JSON object: {"tool":"name","input":"value"} OR {"phaseDone":true} OR {"final":"answer"}.
+- {"phaseDone":true} signals this phase is complete and the agent should advance to the next phase.
+- {"final":"..."} is only valid in the Answering or Verification phase, when the whole task is done.
+- Never repeat a tool call that just failed with the same input. Change tool or input.
+- Tools listed below are the ONLY tools available in this phase. Calls to other tools will be rejected.
+
+Available tools (this phase only):
+{{tools}}
+
+Recent state:
+{{recent_state}}
 """,
             [PromptId.ToolRouter] = """
 Choose the best next tool for this coding agent.

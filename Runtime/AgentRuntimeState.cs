@@ -28,7 +28,11 @@ public sealed class AgentRuntimeState
     {
         get; set;
     } = TaskKind.Generic;
-    public Playbook? CurrentPlaybook
+    public AgentPhase CurrentPhase
+    {
+        get; set;
+    } = AgentPhase.Triage;
+    public PhasePlan? CurrentPhasePlan
     {
         get; set;
     }

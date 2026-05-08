@@ -37,6 +37,9 @@ public sealed class SlashCommandHandler(AgentSession session, TodoStore todoStor
             case "/status":
                 await RunShellAsync("git status");
                 return true;
+            case "/phase":
+                PrintPhase();
+                return true;
             case "/diff":
                 await RunShellAsync("git diff");
                 return true;
@@ -90,6 +93,7 @@ public sealed class SlashCommandHandler(AgentSession session, TodoStore todoStor
 /session       Show current session
 /todos         Show todo list
 /status        Run git status
+/phase         Show current agent phase and remaining phases
 /diff          Run git diff
 /log           Show recent session log
 /history       Show recent command history
@@ -110,6 +114,26 @@ public sealed class SlashCommandHandler(AgentSession session, TodoStore todoStor
     {
         Console.WriteLine($"Session: {_session.Id}");
         Console.WriteLine($"Path: {_session.DirectoryPath}");
+    }
+
+    private void PrintPhase()
+    {
+        if (_state.CurrentPhasePlan is null)
+        {
+            Console.WriteLine("No active phase plan. Run a task first.");
+            return;
+        }
+        var phases = _state.CurrentPhasePlan.Phases;
+        var idx = phases.ToList().IndexOf(_state.CurrentPhase);
+        Console.WriteLine($"Task kind:   {_state.CurrentTaskKind}");
+        Console.WriteLine($"Greenfield:  {_state.CurrentPhasePlan.IsGreenfield}");
+        Console.WriteLine($"Goal:        {_state.CurrentPhasePlan.Goal}");
+        Console.WriteLine($"Phase plan:  {string.Join(" -> ", phases)}");
+        Console.WriteLine($"Current:     {_state.CurrentPhase}{(idx >= 0 ? $" ({idx + 1}/{phases.Count})" : "")}");
+        if (idx >= 0 && idx < phases.Count - 1)
+        {
+            Console.WriteLine($"Remaining:   {string.Join(" -> ", phases.Skip(idx + 1))}");
+        }
     }
     private async Task PrintTodosAsync()
     {

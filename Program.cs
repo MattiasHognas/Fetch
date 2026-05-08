@@ -56,7 +56,7 @@ static Runtime BuildRuntime(string? sessionId, bool newSession)
         new ShellTool(policy, session, sandbox, config)
     ];
 
-    var agent = new AgentLoop(llm, tools, logger, todoStore, config, prompts, session, state, events, semanticIndex);
+    var agent = new AgentLoop(llm, tools, logger, todoStore, config, prompts, session, state, events, semanticIndex, new TriageRunner(llm, prompts, config, sandbox));
     var slash = new SlashCommandHandler(session, todoStore, llm, config, sandbox, state, tools, prompts, semanticIndex);
     return new Runtime(session, llm, todoStore, agent, slash, config, sandbox, state, events, tools, semanticIndex, logger);
 }

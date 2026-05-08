@@ -1,16 +1,40 @@
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Fetch.Core;
 
-public sealed class LlmClient(AgentConfig config) : IDisposable
+public sealed partial class LlmClient(AgentConfig config) : IDisposable
 {
     private readonly HttpClient _http = new();
     private readonly AgentConfig _config = config;
     private bool? _supportsTokenizeEndpoint;
 
+    [GeneratedRegex(@"<think>[\s\S]*?</think>", RegexOptions.IgnoreCase)]
+    private static partial Regex ThinkBlockRegex();
+
     public Task<string> ChatAsync(string prompt, bool stream = false) => stream ? ChatStreamingAsync(prompt) : ChatNonStreamingAsync(prompt);
+
+    /// <summary>Removes &lt;think&gt;...&lt;/think&gt; reasoning blocks emitted by qwen3/deepseek-r1/gpt-oss before JSON parsing.</summary>
+    public static string StripThinking(string response) =>
+        string.IsNullOrEmpty(response) ? response : ThinkBlockRegex().Replace(response, string.Empty).Trim();
+
+    public static bool IsThinkingModel(string? modelName)
+    {
+        if (string.IsNullOrEmpty(modelName))
+        {
+            return false;
+        }
+        var n = modelName.ToLowerInvariant();
+        return n.StartsWith("qwen3", StringComparison.Ordinal)
+            || n.StartsWith("deepseek-r1", StringComparison.Ordinal)
+            || n.StartsWith("gpt-oss", StringComparison.Ordinal)
+            || n.Contains(":qwen3", StringComparison.Ordinal)
+            || n.Contains(":deepseek-r1", StringComparison.Ordinal);
+    }
+
+    private bool ShouldSendThink => _config.EnableThinking && IsThinkingModel(_config.ModelName);
 
     public async Task<int> CountPromptTokensAsync(string prompt)
     {
@@ -36,16 +60,28 @@ public sealed class LlmClient(AgentConfig config) : IDisposable
         return EstimatePromptTokens(prompt);
     }
 
-    private object OllamaRequest(string prompt, bool stream) => new
-    {
-        model = _config.ModelName,
-        prompt,
-        stream,
-        options = new
+    private object OllamaRequest(string prompt, bool stream) => ShouldSendThink
+        ? new
         {
-            num_ctx = _config.ContextWindowTokens
+            model = _config.ModelName,
+            prompt,
+            stream,
+            think = true,
+            options = new
+            {
+                num_ctx = _config.ContextWindowTokens
+            }
         }
-    };
+        : new
+        {
+            model = _config.ModelName,
+            prompt,
+            stream,
+            options = new
+            {
+                num_ctx = _config.ContextWindowTokens
+            }
+        };
 
     private async Task<int> CountPromptTokensWithOllamaAsync(string prompt)
     {
@@ -75,7 +111,8 @@ public sealed class LlmClient(AgentConfig config) : IDisposable
         HttpResponseMessage response = await _http.PostAsJsonAsync($"{_config.ModelBaseUrl.TrimEnd('/')}/api/generate", OllamaRequest(prompt, false));
         _ = response.EnsureSuccessStatusCode();
         using JsonDocument json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
-        return json.RootElement.TryGetProperty("response", out JsonElement r) ? r.GetString() ?? "" : json.RootElement.ToString();
+        var raw = json.RootElement.TryGetProperty("response", out JsonElement r) ? r.GetString() ?? "" : json.RootElement.ToString();
+        return StripThinking(raw);
     }
 
     private async Task<string> ChatStreamingAsync(string prompt)

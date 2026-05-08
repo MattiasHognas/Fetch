@@ -56,8 +56,12 @@ You are operating inside Fetch, a local .NET coding-agent harness with TUI, chat
 ## Repo Hints
 
 - `Program.cs` wires the runtime modes and tool list.
-- `Core/AgentLoop.cs` controls planning, tool execution, approvals, and final responses.
-- `Prompts/PromptCatalog.cs` defines the base planner/router/agent prompt rules.
+- `Core/AgentLoop.cs` controls the per-phase step loop, approvals, grounding, and final responses.
+- `Core/AgentPhase.cs` defines the phase enum and `PhasePlan` record.
+- `Core/PhaseToolPolicy.cs` hard-gates which tools the LLM may call in each phase.
+- `Planning/Triage.cs` runs the LLM triage call that picks the task kind and ordered phases (Discovery, Planning, Editing, Verification, Answering).
+- `Planning/Planning.cs` hosts `ToolRouter`, `CommandResultAnalyzer`, and `TranscriptCompactor`.
+- `Prompts/PromptCatalog.cs` defines the base triage/phase/router prompt rules.
 - `Approval/ApprovalPolicy.cs` and `Config/AgentConfig.cs` define approval and safety behavior.
 - `Tools/` contains the concrete tool semantics.
 
