@@ -204,13 +204,15 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
     private async Task<List<RelationshipEdge>> CollectCallEdgesAsync(LspServerConfig server, List<RelationshipFileModel> files, int maxMethodsPerFile, int maxOutgoingCalls)
     {
         var edges = new List<RelationshipEdge>();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(15, _config.Lsp.RequestTimeoutSeconds * 2)));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(60, _config.Lsp.RequestTimeoutSeconds * 4)));
         await using var client = new LspClient(server, _sandbox);
         await InitializeAsync(client, cts.Token);
 
+        var fileUris = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (RelationshipFileModel file in files)
         {
             var uri = new Uri(file.AbsolutePath).AbsoluteUri;
+            fileUris[file.RelativePath] = uri;
             var text = await File.ReadAllTextAsync(file.AbsolutePath, cts.Token);
             await client.NotifyAsync("textDocument/didOpen", new
             {
@@ -222,7 +224,11 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
                     text
                 }
             }, cts.Token);
+        }
 
+        foreach (RelationshipFileModel file in files)
+        {
+            var uri = fileUris[file.RelativePath];
             JsonElement documentSymbols = await client.RequestAsync("textDocument/documentSymbol", new
             {
                 textDocument = new
@@ -233,18 +239,7 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
 
             foreach (RelationshipMethodModel method in ExtractMethodCandidates(documentSymbols).Take(maxMethodsPerFile))
             {
-                JsonElement prepared = await client.RequestAsync("textDocument/prepareCallHierarchy", new
-                {
-                    textDocument = new
-                    {
-                        uri
-                    },
-                    position = new
-                    {
-                        line = Math.Max(0, method.Line - 1),
-                        character = Math.Max(0, method.Character - 1)
-                    }
-                }, cts.Token);
+                JsonElement prepared = await PrepareCallHierarchyWithRetryAsync(client, uri, method, cts.Token);
                 if (prepared.ValueKind != JsonValueKind.Array)
                 {
                     continue;
@@ -290,15 +285,67 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
             .Select(g => g.First())];
     }
 
+    private static async Task<JsonElement> PrepareCallHierarchyWithRetryAsync(LspClient client, string uri, RelationshipMethodModel method, CancellationToken ct)
+    {
+        TimeSpan[] delays = [TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(8)];
+        JsonElement last = default;
+        foreach (TimeSpan delay in delays)
+        {
+            if (delay > TimeSpan.Zero)
+            {
+                try
+                {
+                    await Task.Delay(delay, ct);
+                }
+                catch { return last; }
+            }
+            try
+            {
+                last = await client.RequestAsync("textDocument/prepareCallHierarchy", new
+                {
+                    textDocument = new
+                    {
+                        uri
+                    },
+                    position = new
+                    {
+                        line = Math.Max(0, method.Line - 1),
+                        character = Math.Max(0, method.Character - 1)
+                    }
+                }, ct);
+            }
+            catch
+            {
+                continue;
+            }
+            if (last.ValueKind == JsonValueKind.Array && last.GetArrayLength() > 0)
+            {
+                return last;
+            }
+        }
+        return last;
+    }
+
     private async Task InitializeAsync(LspClient client, CancellationToken ct)
     {
         var rootUri = new Uri(_sandbox.Root).AbsoluteUri;
+        var folderName = new DirectoryInfo(_sandbox.Root).Name;
         _ = await client.RequestAsync("initialize", new
         {
             processId = Environment.ProcessId,
             rootUri,
+            rootPath = _sandbox.Root,
+            workspaceFolders = new[]
+            {
+                new { uri = rootUri, name = folderName }
+            },
             capabilities = new
             {
+                workspace = new
+                {
+                    workspaceFolders = true,
+                    configuration = true
+                },
                 textDocument = new
                 {
                     documentSymbol = new
@@ -309,6 +356,10 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
                     {
                         dynamicRegistration = false
                     }
+                },
+                window = new
+                {
+                    workDoneProgress = true
                 }
             }
         }, ct);
