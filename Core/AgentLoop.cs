@@ -1,8 +1,9 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Fetch.Core;
 
-public sealed class AgentLoop
+public sealed partial class AgentLoop
 {
     private readonly LlmClient _llm; private readonly Dictionary<string, ITool> _tools; private readonly SessionLogger _logger; private readonly TodoStore _todoStore; private readonly AgentConfig _config; private readonly PromptCatalog _prompts; private readonly AgentSession _session; private readonly AgentRuntimeState _state; private readonly AgentEventStore _events; private readonly SemanticIndex _semanticIndex; private readonly TriageRunner _triage; private readonly ToolRouter _router; private readonly CommandResultAnalyzer _analyzer; private readonly TranscriptCompactor _compactor; private readonly ApprovalPolicy _approvalPolicy; private readonly string? _agentMd;
     private static readonly HashSet<string> MutationToolNames = new(StringComparer.Ordinal) { "apply_diff", "apply_patch", "create_file", "delete_file", "rename_file" };
@@ -110,6 +111,7 @@ public sealed class AgentLoop
         var transcript = "";
         var successfulDiscoveryCalls = new HashSet<string>(StringComparer.Ordinal);
         var failedToolCalls = new HashSet<string>(StringComparer.Ordinal);
+        var mutationLog = new List<string>();
         IReadOnlyList<AgentPhase> phases = triage.Plan.Phases;
 
         for (var phaseIndex = 0; phaseIndex < phases.Count; phaseIndex++)
@@ -364,6 +366,14 @@ public sealed class AgentLoop
                         {
                             reportMutation(true);
                             phaseHadSuccessfulMutation = true;
+                            foreach (var p in ExtractMutationPaths(toolName, input, result))
+                            {
+                                var entry = $"{toolName} -> {p}";
+                                if (!mutationLog.Contains(entry, StringComparer.Ordinal))
+                                {
+                                    mutationLog.Add(entry);
+                                }
+                            }
                         }
                         // todos advance at phase boundary, not per tool call.
                         if (isLastPhase && await TryCompleteRunAsync(task, toolName, input, result))
@@ -425,7 +435,7 @@ public sealed class AgentLoop
                 break;
             }
         }
-        await SynthesizeFinalAsync(task, triage, transcript);
+        await SynthesizeFinalAsync(task, triage, transcript, mutationLog);
     }
 
     private async Task SeedPhaseTodosAsync(PhasePlan plan)
@@ -539,26 +549,34 @@ public sealed class AgentLoop
         return true;
     }
 
-    private async Task SynthesizeFinalAsync(string task, TriageResult triage, string transcript)
+    private async Task SynthesizeFinalAsync(string task, TriageResult triage, string transcript, List<string> mutationLog)
     {
         await _logger.LogAsync("synthesize_final", new
         {
             steps = _config.MaxAgentSteps,
-            reason = "phases_completed_without_final"
+            reason = "phases_completed_without_final",
+            mutations = mutationLog
         });
         try
         {
             var summary = await _compactor.CompactAsync(transcript);
+            var mutationsBlock = mutationLog.Count == 0
+                ? "(none recorded)"
+                : string.Join("\n", mutationLog.Select(m => $"- {m}"));
             var prompt = _prompts.Render(PromptId.FinalSynthesis, new()
             {
                 ["task"] = task,
                 ["task_kind"] = triage.Kind.ToString(),
-                ["transcript"] = summary
+                ["transcript"] = $"Confirmed successful file writes during this run:\n{mutationsBlock}\n\n{summary}"
             });
             var synthesized = await _llm.ChatAsync(prompt);
             var text = string.IsNullOrWhiteSpace(synthesized)
                 ? $"Stopped after {_config.MaxAgentSteps} steps without producing a final answer."
                 : synthesized.Trim();
+            if (mutationLog.Count > 0 && LooksLikeDeniedFinal(text))
+            {
+                text = $"Completed: {task}\n\nConfirmed file writes:\n{mutationsBlock}";
+            }
             if (ShouldSuppressDraftFinal(triage.Kind, transcript, text))
             {
                 text = "Stopped after the step budget. The agent gathered repo context but never completed the write: apply_diff was repeatedly called with incorrectly wrapped input instead of a raw patch. The next run should retry apply_diff with a real *** Begin Patch payload and then request approval.";
@@ -590,6 +608,63 @@ public sealed class AgentLoop
             || transcript.Contains("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)) && !transcript.Contains("Patch applied successfully.", StringComparison.OrdinalIgnoreCase) && (synthesized.Contains("# Architecture", StringComparison.OrdinalIgnoreCase)
             || synthesized.Contains("## ", StringComparison.Ordinal)
             || synthesized.Contains("```mermaid", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool LooksLikeDeniedFinal(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return true;
+        }
+        var lower = text.ToLowerInvariant();
+        return lower.Contains("i'm unable")
+            || lower.Contains("i am unable")
+            || lower.Contains("unable to generate")
+            || lower.Contains("no data or steps mentioned")
+            || lower.Contains("transcript only indicates")
+            || lower.Contains("cannot generate")
+            || lower.Contains("there is no data");
+    }
+
+    [GeneratedRegex(@"\*\*\* (?:Add|Update|Delete) File:\s*(\S+)")]
+    private static partial Regex PatchPathRegex();
+
+    [GeneratedRegex(@"(?:wrote|created|updated|renamed to|deleted)\s+([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)", RegexOptions.IgnoreCase)]
+    private static partial Regex MutationResultPathRegex();
+
+    private static IEnumerable<string> ExtractMutationPaths(string toolName, string input, string result)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(input))
+        {
+            var p = TryExtractPathInput(input);
+            if (!string.IsNullOrWhiteSpace(p) && seen.Add(p))
+            {
+                yield return p;
+            }
+        }
+        if (toolName is "apply_diff" or "apply_patch" && !string.IsNullOrWhiteSpace(input))
+        {
+            foreach (Match m in PatchPathRegex().Matches(input))
+            {
+                var p = m.Groups[1].Value.Trim();
+                if (!string.IsNullOrWhiteSpace(p) && seen.Add(p))
+                {
+                    yield return p;
+                }
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(result))
+        {
+            foreach (Match m in MutationResultPathRegex().Matches(result))
+            {
+                var p = m.Groups[1].Value.Trim();
+                if (!string.IsNullOrWhiteSpace(p) && seen.Add(p))
+                {
+                    yield return p;
+                }
+            }
+        }
     }
 
     private static string? BuildRecoveryGuidance(string toolName, string result)
