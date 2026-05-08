@@ -118,7 +118,7 @@ public sealed class TuiApp(AgentLoop agent, AgentEventStore events, AgentRuntime
         const int maxChars = 1200;
         return text.Length <= maxChars ? text : text[..maxChars] + "\n[truncated]";
     }
-    private static string ShortType(AgentEventType type) => type switch { AgentEventType.UserInput => "USER", AgentEventType.LlmResponse => "LLM ", AgentEventType.ToolCall => "CALL", AgentEventType.ToolResult => "DONE", AgentEventType.Error => "ERR ", AgentEventType.Final => "FIN ", _ => "EVT " };
+    private static string ShortType(AgentEventType type) => type switch { AgentEventType.UserInput => "USER", AgentEventType.LlmResponse => "LLM ", AgentEventType.Reasoning => "THNK", AgentEventType.ToolCall => "CALL", AgentEventType.ToolResult => "DONE", AgentEventType.Error => "ERR ", AgentEventType.Final => "FIN ", _ => "EVT " };
 
     public void Dispose()
     {

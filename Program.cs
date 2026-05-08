@@ -21,7 +21,7 @@ static Runtime BuildRuntime(string? sessionId, bool newSession)
     var policy = new CommandPolicy(config);
     var embeddings = new EmbeddingClient(config);
     var semanticIndex = new SemanticIndex(config, sandbox, secrets, embeddings, ignore);
-    var searchContent = new SearchContentTool(sandbox);
+    var searchContent = new SearchContentTool(sandbox, config);
     var lspSelector = new LspServerSelector(config, sandbox);
     var contextRefiner = new ContextRefiner(llm, prompts);
     var state = new AgentRuntimeState
