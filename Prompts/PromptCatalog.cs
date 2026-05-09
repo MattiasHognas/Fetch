@@ -95,7 +95,7 @@ Available tools:
             [PromptId.Triage] = """
 You are the triage step of a small-context coding agent. Pick the task kind and the ordered list of phases the agent should run. Keep it minimal.
 
-Allowed kinds: Question | ArchitectureDocs | Documentation | BugFix | Refactor | Feature | Greenfield | Generic
+Allowed kinds: Question | ArchitectureDocs | Documentation | BugFix | Refactor | Feature | Generic
 Allowed phases: Discovery | Planning | Editing | Verification | Answering
 
 Phase guidance:
@@ -103,11 +103,13 @@ Phase guidance:
 - ArchitectureDocs / Documentation about THIS repo -> [Discovery, Editing, Verification]
 - BugFix / Refactor -> [Discovery, Planning, Editing, Verification]
 - Feature in EXISTING code -> [Discovery, Planning, Editing, Verification]
-- Greenfield (no relevant existing code, isGreenfield=true) -> [Planning, Editing, Verification]
+- Greenfield (no relevant existing code) is represented by isGreenfield=true, not by a separate kind. Use the closest allowed kind and phases [Planning, Editing, Verification].
 - Pure docs/no-code answer with no edits -> [Discovery, Answering]
 
 Return ONLY JSON, no prose, no fences:
 {"kind":"...","phases":["...","..."],"isGreenfield":false,"goal":"one short sentence","needsTests":true}
+
+Do not omit any field. The response is rejected if kind, phases, isGreenfield, goal, or needsTests is missing or invalid.
 
 Repo snapshot:
 {{repo_snapshot}}

@@ -92,7 +92,32 @@ public sealed partial class AgentLoop
             task,
             mode = "native_tools"
         });
-        TriageResult triage = await _triage.RunAsync(task, _agentMd);
+        TriageResult triage;
+        try
+        {
+            triage = await _triage.RunAsync(task, _agentMd);
+        }
+        catch (TriageFailureException ex)
+        {
+            var blocker = $"Blocked: triage failed because the model did not return valid classification JSON. {ex.Message}";
+            _events.Add(AgentEventType.Error, "Triage failed", blocker);
+            _events.Add(AgentEventType.Final, "Final", blocker);
+            await _logger.LogAsync("triage_failure", new
+            {
+                task,
+                reason = ex.Message,
+                raw = ex.RawResponse,
+                mode = "native_tools"
+            });
+            await _logger.LogAsync("final", new
+            {
+                text = blocker,
+                reason = "triage_invalid",
+                mode = "native_tools"
+            });
+            Console.WriteLine(blocker);
+            return;
+        }
         _state.CurrentTaskKind = triage.Kind;
         _state.CurrentPhasePlan = triage.Plan;
         _state.GroundingEvidenceBytes = 0;
@@ -399,11 +424,6 @@ public sealed partial class AgentLoop
                                                 }
                                             }
                                         }
-
-                                        if (isLastPhase && await TryCompleteRunAsync(task, toolName, input, result))
-                                        {
-                                            return;
-                                        }
                                     }
 
                                     if (toolName == "run_command")
@@ -503,15 +523,6 @@ public sealed partial class AgentLoop
             if (phaseDone)
             {
                 await AdvancePhaseTodoAsync(phase);
-                if (isLastPhase)
-                {
-                    ToolExecution? completionTool = lastSuccessfulPhaseTool ?? _state.LastTool;
-                    if (completionTool is { IsError: false }
-                        && await TryCompleteRunAsync(task, completionTool.Tool, completionTool.Input, completionTool.Result))
-                    {
-                        return;
-                    }
-                }
             }
             if (phase is AgentPhase.Editing && !phaseHadSuccessfulMutation)
             {
@@ -581,38 +592,6 @@ public sealed partial class AgentLoop
             (TaskKind.Documentation, AgentPhase.Verification) => "Verification phase: verify the docs markdown file (read_file)",
             _ => $"{phase} phase"
         };
-    }
-
-    private async Task<bool> TryCompleteRunAsync(string task, string toolName, string input, string result)
-    {
-        List<TodoItem> todos = await _todoStore.ReadAsync();
-        if (todos.Count == 0 || todos.Any(t => !string.Equals(t.Status, "done", StringComparison.Ordinal)))
-        {
-            return false;
-        }
-
-        var text = BuildCompletionMessage(task, toolName, input, result);
-        _events.Add(AgentEventType.Final, "Final", text);
-        await _logger.LogAsync("final", new
-        {
-            text,
-            completedByTodos = true
-        });
-        Console.WriteLine(text);
-        return true;
-    }
-
-    private static string BuildCompletionMessage(string task, string toolName, string input, string result)
-    {
-        if (toolName == "read_file")
-        {
-            var verifiedPath = TryExtractPathInput(input) ?? input.Trim();
-            return $"Completed: {task}. Verified {verifiedPath} after writing it.";
-        }
-
-        return toolName == "run_command" && result.Contains("\"ExitCode\": 0", StringComparison.Ordinal)
-            ? $"Completed: {task}. The final verification command succeeded."
-            : $"Completed: {task}.";
     }
 
     private static string? TryExtractPathInput(string input)
@@ -739,14 +718,6 @@ public sealed partial class AgentLoop
             var text = string.IsNullOrWhiteSpace(synthesized)
                 ? $"Stopped after {_config.MaxAgentSteps} steps without producing a final answer."
                 : synthesized.Trim();
-            if (mutationLog.Count > 0 && LooksLikeDeniedFinal(text))
-            {
-                text = $"Completed: {task}\n\nConfirmed file writes:\n{mutationsBlock}";
-            }
-            if (ShouldSuppressDraftFinal(triage.Kind, transcript, text))
-            {
-                text = "Stopped after the step budget. The agent gathered repo context but never completed the write: apply_diff was repeatedly called with incorrectly wrapped input instead of a raw patch. The next run should retry apply_diff with a real *** Begin Patch payload and then request approval.";
-            }
             _events.Add(AgentEventType.Final, "Final", text);
             await _logger.LogAsync("final", new
             {
@@ -766,30 +737,6 @@ public sealed partial class AgentLoop
             });
             Console.WriteLine(text);
         }
-    }
-
-    private static bool ShouldSuppressDraftFinal(TaskKind kind, string transcript, string synthesized)
-    {
-        return kind is TaskKind.ArchitectureDocs or TaskKind.Documentation && (transcript.Contains("Patch parse failed:", StringComparison.OrdinalIgnoreCase)
-            || transcript.Contains("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)) && !transcript.Contains("Patch applied successfully.", StringComparison.OrdinalIgnoreCase) && (synthesized.Contains("# Architecture", StringComparison.OrdinalIgnoreCase)
-            || synthesized.Contains("## ", StringComparison.Ordinal)
-            || synthesized.Contains("```mermaid", StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static bool LooksLikeDeniedFinal(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return true;
-        }
-        var lower = text.ToLowerInvariant();
-        return lower.Contains("i'm unable")
-            || lower.Contains("i am unable")
-            || lower.Contains("unable to generate")
-            || lower.Contains("no data or steps mentioned")
-            || lower.Contains("transcript only indicates")
-            || lower.Contains("cannot generate")
-            || lower.Contains("there is no data");
     }
 
     [GeneratedRegex(@"\*\*\* (?:Add|Update|Delete) File:\s*(\S+)")]

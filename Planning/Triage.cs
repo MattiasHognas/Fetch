@@ -4,9 +4,14 @@ namespace Fetch.Planning;
 
 public sealed record TriageResult(TaskKind Kind, PhasePlan Plan, string Goal, bool NeedsTests, string LlmRaw);
 
+public sealed class TriageFailureException(string message, string rawResponse) : Exception(message)
+{
+    public string RawResponse { get; } = rawResponse;
+}
+
 /// <summary>
 /// Runs a single small-context LLM call to classify the task and pick the ordered list of phases.
-/// Falls back to the deterministic keyword classifier when the LLM returns invalid JSON.
+/// The model must return a complete, valid triage payload; invalid or incomplete triage blocks the run.
 /// </summary>
 public sealed class TriageRunner(LlmClient llm, PromptCatalog prompts, AgentConfig config, PathSandbox sandbox)
 {
@@ -25,46 +30,54 @@ public sealed class TriageRunner(LlmClient llm, PromptCatalog prompts, AgentConf
             ["repo_snapshot"] = snapshot.Description
         });
         var raw = await _llm.ChatAsync(prompt);
-        return TryParse(raw, snapshot, out TriageResult? parsed)
-            ? parsed
-            : Fallback(task, snapshot, raw);
+        return ParseOrThrow(raw);
     }
 
-    private static bool TryParse(string raw, RepoSnapshot snapshot, out TriageResult result)
+    private static TriageResult ParseOrThrow(string raw)
     {
-        result = null!;
         if (!JsonHelper.TryParseObject(raw, out JsonDocument? doc, out _) || doc is null)
         {
-            return false;
+            throw new TriageFailureException("The model returned non-JSON triage output. Expected a single JSON object with kind, phases, isGreenfield, goal, and needsTests.", raw);
         }
+
         try
         {
             JsonElement root = doc.RootElement;
-            var kindStr = root.TryGetProperty("kind", out JsonElement k) ? k.GetString() ?? "Generic" : "Generic";
-            if (!Enum.TryParse(kindStr, ignoreCase: true, out TaskKind kind))
+            if (root.ValueKind != JsonValueKind.Object)
             {
-                kind = TaskKind.Generic;
+                throw new TriageFailureException("The triage response must be a JSON object.", raw);
             }
-            var phases = new List<AgentPhase>();
-            if (root.TryGetProperty("phases", out JsonElement p) && p.ValueKind == JsonValueKind.Array)
+
+            if (!TryGetRequiredString(root, "kind", out var kindStr)
+                || !Enum.TryParse(kindStr, ignoreCase: true, out TaskKind kind))
             {
-                foreach (JsonElement el in p.EnumerateArray())
-                {
-                    if (el.ValueKind == JsonValueKind.String && Enum.TryParse(el.GetString(), true, out AgentPhase ph) && ph != AgentPhase.Triage)
-                    {
-                        phases.Add(ph);
-                    }
-                }
+                var allowedKinds = string.Join(", ", Enum.GetNames<TaskKind>());
+                var invalidKind = string.IsNullOrWhiteSpace(kindStr) ? "(missing)" : kindStr;
+                throw new TriageFailureException($"Invalid triage kind '{invalidKind}'. Allowed kinds: {allowedKinds}.", raw);
             }
-            var isGreenfield = (root.TryGetProperty("isGreenfield", out JsonElement g) && g.ValueKind == JsonValueKind.True) || snapshot.IsGreenfield;
-            var goal = root.TryGetProperty("goal", out JsonElement gl) ? gl.GetString() ?? "" : "";
-            var needsTests = !root.TryGetProperty("needsTests", out JsonElement nt) || nt.ValueKind != JsonValueKind.False;
-            if (phases.Count == 0)
+
+            if (!TryGetRequiredPhases(root, out List<AgentPhase> phases, out var phasesError))
             {
-                phases = DefaultPhases(kind, isGreenfield);
+                throw new TriageFailureException(phasesError, raw);
             }
-            result = new TriageResult(kind, new PhasePlan(kind, phases, isGreenfield, goal), goal, needsTests, raw);
-            return true;
+
+            if (!TryGetRequiredBoolean(root, "isGreenfield", out var isGreenfield))
+            {
+                throw new TriageFailureException("Missing or invalid triage field 'isGreenfield'. Expected true or false.", raw);
+            }
+
+            if (!TryGetRequiredString(root, "goal", out var goal) || string.IsNullOrWhiteSpace(goal))
+            {
+                throw new TriageFailureException("Missing or invalid triage field 'goal'. Expected a short non-empty string.", raw);
+            }
+
+            if (!TryGetRequiredBoolean(root, "needsTests", out var needsTests))
+            {
+                throw new TriageFailureException("Missing or invalid triage field 'needsTests'. Expected true or false.", raw);
+            }
+
+            var trimmedGoal = goal.Trim();
+            return new TriageResult(kind, new PhasePlan(kind, phases, isGreenfield, trimmedGoal), trimmedGoal, needsTests, raw);
         }
         finally
         {
@@ -72,27 +85,75 @@ public sealed class TriageRunner(LlmClient llm, PromptCatalog prompts, AgentConf
         }
     }
 
-    private static TriageResult Fallback(string task, RepoSnapshot snapshot, string raw)
+    private static bool TryGetRequiredString(JsonElement root, string propertyName, out string value)
     {
-        TaskKind kind = TaskClassifier.Classify(task);
-        List<AgentPhase> phases = DefaultPhases(kind, snapshot.IsGreenfield);
-        return new TriageResult(kind, new PhasePlan(kind, phases, snapshot.IsGreenfield, task), task, true, raw);
+        value = "";
+        if (!root.TryGetProperty(propertyName, out JsonElement property) || property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        value = property.GetString() ?? "";
+        return !string.IsNullOrWhiteSpace(value);
     }
 
-    private static List<AgentPhase> DefaultPhases(TaskKind kind, bool isGreenfield)
+    private static bool TryGetRequiredBoolean(JsonElement root, string propertyName, out bool value)
     {
-        return isGreenfield
-            ? [AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification]
-            : kind switch
+        value = false;
+        if (!root.TryGetProperty(propertyName, out JsonElement property)
+            || property.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return false;
+        }
+
+        value = property.ValueKind == JsonValueKind.True;
+        return true;
+    }
+
+    private static bool TryGetRequiredPhases(JsonElement root, out List<AgentPhase> phases, out string error)
+    {
+        phases = [];
+        error = "";
+        if (!root.TryGetProperty("phases", out JsonElement property) || property.ValueKind != JsonValueKind.Array)
+        {
+            error = "Missing or invalid triage field 'phases'. Expected a non-empty array of phase names.";
+            return false;
+        }
+
+        var parsed = new List<AgentPhase>();
+        var seen = new HashSet<AgentPhase>();
+        foreach (JsonElement element in property.EnumerateArray())
+        {
+            if (element.ValueKind != JsonValueKind.String)
             {
-                TaskKind.Question => [AgentPhase.Discovery, AgentPhase.Answering],
-                TaskKind.ArchitectureDocs or TaskKind.Documentation =>
-                    [AgentPhase.Discovery, AgentPhase.Editing, AgentPhase.Verification],
-                TaskKind.BugFix or TaskKind.Refactor or TaskKind.Feature =>
-                    [AgentPhase.Discovery, AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification],
-                TaskKind.Generic => throw new NotImplementedException(),
-                _ => [AgentPhase.Discovery, AgentPhase.Planning, AgentPhase.Editing, AgentPhase.Verification]
-            };
+                error = "Invalid triage field 'phases'. Every phase must be a string name.";
+                return false;
+            }
+
+            var phaseName = element.GetString();
+            if (!Enum.TryParse(phaseName, ignoreCase: true, out AgentPhase phase) || phase == AgentPhase.Triage)
+            {
+                error = $"Invalid triage phase '{phaseName ?? "(missing)"}'.";
+                return false;
+            }
+
+            if (!seen.Add(phase))
+            {
+                error = $"Duplicate triage phase '{phase}'. Return each phase at most once.";
+                return false;
+            }
+
+            parsed.Add(phase);
+        }
+
+        if (parsed.Count == 0)
+        {
+            error = "Missing or invalid triage field 'phases'. Expected a non-empty array of phase names.";
+            return false;
+        }
+
+        phases = parsed;
+        return true;
     }
 
     private RepoSnapshot ProbeRepo()
