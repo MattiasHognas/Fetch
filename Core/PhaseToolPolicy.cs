@@ -56,6 +56,7 @@ public static class PhaseToolPolicy
             "Planning phase: turn evidence into a concrete todo list with todo_write. Each todo should name the tool that will satisfy it, e.g. 'Read AgentLoop.cs (read_ranges)'. Then return phaseDone.",
         AgentPhase.Editing =>
             "Editing phase: apply focused patches (apply_diff/apply_patch) or create files. Read first, write second. Do NOT run commands or do new exploration here.\n" +
+            "For architecture/documentation tasks, the first Editing-phase tool call must be apply_diff or create_file for the docs target. If that first write attempt fails, you may read the target file before retrying.\n" +
             "You MUST attempt apply_diff (or another mutation tool) for the current todo before returning {\"phaseDone\":true}. phaseDone with no successful mutation will be rejected.\n" +
             "apply_diff input MUST be a raw V4A patch string. Example:\n" +
             "*** Begin Patch\n" +
