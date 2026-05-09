@@ -11,7 +11,9 @@ public sealed class FileHashStore(string root)
 {
     private readonly string _path = Path.Combine(root, "filehashes.json");
 
-    public async Task<Dictionary<string, string>> LoadAsync() => File.Exists(_path) ? JsonSerializer.Deserialize<Dictionary<string, string>>(await File.ReadAllTextAsync(_path), AgentConfig.JsonOptions()) ?? [] : [];
+    public async Task<Dictionary<string, string>> LoadAsync() => File.Exists(_path)
+        ? JsonSerializer.Deserialize<Dictionary<string, string>>(await File.ReadAllTextAsync(_path), AgentConfig.JsonOptions()) ?? []
+        : [];
     public async Task SaveAsync(Dictionary<string, string> h)
     {
         _ = Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
@@ -230,10 +232,25 @@ public sealed class SemanticIndex(AgentConfig config, PathSandbox sandbox, Secre
     }
 }
 
-public sealed class SemanticSearchTool(SemanticIndex index) : ITool
+public sealed class SemanticSearchTool(SemanticIndex index) : ITool, INativeTool
 {
     private readonly SemanticIndex _index = index;
 
-    public string Name => "semantic_search"; public string Description => "Search repo semantically by meaning, not exact text. Input: natural language query."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "semantic_search";
+    public string Description => "Search the repo semantically by meaning from JSON arguments.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["query"] = NativeToolJson.StringProperty("Natural-language semantic search query.")
+    }, "query");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetString(arguments, "query", out var query)
+            ? query
+            : "";
+    }
+
     public Task<string> RunAsync(string input) => _index.SearchAsync(input);
 }

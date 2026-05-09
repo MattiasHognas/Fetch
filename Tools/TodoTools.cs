@@ -22,13 +22,18 @@ public sealed class TodoStore(AgentSession session)
     }
 }
 
-public sealed class TodoReadTool(TodoStore store) : ITool
+public sealed class TodoReadTool(TodoStore store) : ITool, INativeTool
 {
     private readonly TodoStore _store = store;
 
     public string Name => "todo_read";
     public string Description => "Read the current agent todo list.";
     public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.EmptyObjectSchema();
+
+    public string ConvertArguments(JsonElement arguments) => "";
+
     public async Task<string> RunAsync(string input)
     {
         List<TodoItem> todos = await _store.ReadAsync();
@@ -36,13 +41,31 @@ public sealed class TodoReadTool(TodoStore store) : ITool
     }
 }
 
-public sealed class TodoWriteTool(TodoStore store) : ITool
+public sealed class TodoWriteTool(TodoStore store) : ITool, INativeTool
 {
     private readonly TodoStore _store = store;
 
     public string Name => "todo_write";
-    public string Description => "Replace the current todo list. Input JSON array: [{id,text,status}] with status pending|in_progress|done.";
+    public string Description => "Replace the current todo list from JSON arguments.";
     public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["todos"] = NativeToolJson.ArrayProperty(NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+        {
+            ["id"] = NativeToolJson.IntegerProperty("Todo identifier.", 1),
+            ["text"] = NativeToolJson.StringProperty("Todo description text."),
+            ["status"] = NativeToolJson.StringProperty("Todo status: pending, in_progress, or done.")
+        }, "id", "text", "status"), "Todo items to persist.", 0)
+    }, "todos");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetElement(arguments, "todos", out JsonElement todos) && todos.ValueKind == JsonValueKind.Array
+            ? todos.GetRawText()
+            : "";
+    }
+
     public async Task<string> RunAsync(string input)
     {
         List<TodoItem>? todos;

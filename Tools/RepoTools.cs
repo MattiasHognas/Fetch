@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Text.Json;
 
 namespace Fetch.Tools;
 
@@ -25,11 +27,26 @@ public sealed class RepoMap
     }
 }
 
-public sealed class RepoTreeTool(IgnoreRules ignore, PathSandbox sandbox) : ITool
+public sealed class RepoTreeTool(IgnoreRules ignore, PathSandbox sandbox) : ITool, INativeTool
 {
     private readonly IgnoreRules _ignore = ignore; private readonly PathSandbox _sandbox = sandbox;
 
-    public string Name => "repo_tree"; public string Description => "Show repository tree. Input: optional depth number, default 2."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "repo_tree";
+    public string Description => "Show repository tree from JSON arguments.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["depth"] = NativeToolJson.IntegerProperty("Optional directory depth. Defaults to 2.", 1, 6)
+    });
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetInt(arguments, "depth", out var depth)
+            ? depth.ToString(CultureInfo.InvariantCulture)
+            : "";
+    }
+
     public Task<string> RunAsync(string input)
     {
         var depth = int.TryParse(input.Trim(), out var d) ? Math.Clamp(d, 1, 6) : 2;
@@ -66,11 +83,26 @@ public sealed class RepoTreeTool(IgnoreRules ignore, PathSandbox sandbox) : IToo
     }
 }
 
-public sealed class SearchTool(RepoMap repo) : ITool
+public sealed class SearchTool(RepoMap repo) : ITool, INativeTool
 {
     private readonly RepoMap _repo = repo;
 
-    public string Name => "search_files"; public string Description => "Search files by keyword/path."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "search_files";
+    public string Description => "Search files by keyword or path from JSON arguments.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["query"] = NativeToolJson.StringProperty("Search term for matching file paths.")
+    }, "query");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetString(arguments, "query", out var query)
+            ? query
+            : "";
+    }
+
     public Task<string> RunAsync(string input)
     {
         var term = input.Trim();
@@ -78,12 +110,27 @@ public sealed class SearchTool(RepoMap repo) : ITool
     }
 }
 
-public sealed class SearchContentTool(PathSandbox sandbox, AgentConfig config) : ITool
+public sealed class SearchContentTool(PathSandbox sandbox, AgentConfig config) : ITool, INativeTool
 {
     private readonly PathSandbox _sandbox = sandbox;
     private readonly AgentConfig _config = config;
 
-    public string Name => "search_content"; public string Description => "Search file contents using ripgrep. Input: search term or regex."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "search_content";
+    public string Description => "Search file contents using ripgrep from JSON arguments.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["query"] = NativeToolJson.StringProperty("Search term or regex for ripgrep.")
+    }, "query");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetString(arguments, "query", out var query)
+            ? query
+            : "";
+    }
+
     public async Task<string> RunAsync(string input)
     {
         var query = input.Trim();

@@ -15,7 +15,7 @@ public sealed class CodeMapTool(
     AgentConfig config,
     PathSandbox sandbox,
     IgnoreRules ignore,
-    LspServerSelector lspSelector) : ITool
+    LspServerSelector lspSelector) : ITool, INativeTool
 {
     private readonly AgentConfig _config = config;
     private readonly PathSandbox _sandbox = sandbox;
@@ -30,8 +30,23 @@ public sealed class CodeMapTool(
     public string Description =>
         "Get a repository code map: every source file with its top-level classes/types and public members. "
         + "Use this FIRST for architecture, overview, refactor-planning, or 'where is X' tasks before reading individual files. "
-        + "Optional input JSON {\"path\":\"sub/dir\",\"include\":\"*.cs\"} to scope. Empty input maps the whole repo.";
+        + "Use JSON arguments like {\"path\":\"sub/dir\",\"include\":\"*.cs\"} to scope. Empty input maps the whole repo.";
     public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["path"] = NativeToolJson.StringProperty("Optional repo-relative directory to scope the map."),
+        ["include"] = NativeToolJson.StringProperty("Optional file-name glob such as '*.cs'.")
+    });
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.SerializeObject(new Dictionary<string, object?>
+        {
+            ["path"] = NativeToolJson.TryGetString(arguments, "path", out var path) ? path : null,
+            ["include"] = NativeToolJson.TryGetString(arguments, "include", out var include) ? include : null
+        });
+    }
 
     public async Task<string> RunAsync(string input)
     {
@@ -190,7 +205,7 @@ public sealed class CodeMapTool(
             }
         }
 
-        return (trimmed, null);
+        return (null, null);
     }
 
     private static string Render(IEnumerable<FileSymbols> files)

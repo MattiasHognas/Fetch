@@ -5,7 +5,7 @@ namespace Fetch.Lsp;
 
 public sealed record RelationshipMapRequest(string[] Files, int MaxMethodsPerFile = 4, int MaxOutgoingCalls = 6);
 
-public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector) : ITool
+public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector) : ITool, INativeTool
 {
     [System.Text.RegularExpressions.GeneratedRegex(@"\b(?:class|record|struct|interface|enum)\s+([A-Z][A-Za-z0-9_]*)")]
     private static partial System.Text.RegularExpressions.Regex TypeDeclRegex();
@@ -18,8 +18,27 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
     private readonly LspServerSelector _selector = selector;
 
     public string Name => "relationship_map";
-    public string Description => "Map outgoing calls between methods in selected files via LSP call hierarchy. Requires a configured C# LSP server. Input JSON {\"files\":[\"Program.cs\",\"Core/AgentLoop.cs\"]}.";
+    public string Description => "Map outgoing calls between methods in selected files via LSP call hierarchy from JSON arguments. Requires a configured C# LSP server.";
     public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["files"] = NativeToolJson.ArrayProperty(NativeToolJson.StringProperty("Repo-relative C# file path."), "Files to analyze.", 1),
+        ["maxMethodsPerFile"] = NativeToolJson.IntegerProperty("Optional maximum methods per file to inspect.", 1),
+        ["maxOutgoingCalls"] = NativeToolJson.IntegerProperty("Optional maximum outgoing calls per method.", 1)
+    }, "files");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetStringArray(arguments, "files", out var files)
+            ? NativeToolJson.SerializeObject(new Dictionary<string, object?>
+            {
+                ["files"] = files,
+                ["maxMethodsPerFile"] = NativeToolJson.TryGetInt(arguments, "maxMethodsPerFile", out var maxMethodsPerFile) ? maxMethodsPerFile : null,
+                ["maxOutgoingCalls"] = NativeToolJson.TryGetInt(arguments, "maxOutgoingCalls", out var maxOutgoingCalls) ? maxOutgoingCalls : null
+            })
+            : "";
+    }
 
     public async Task<string> RunAsync(string input)
     {

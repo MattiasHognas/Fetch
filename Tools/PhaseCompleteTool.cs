@@ -16,25 +16,15 @@ public sealed class PhaseCompleteTool : ITool, INativeTool
             : $"Phase completion requested. Summary: {summary}");
     }
 
-    public object GetParametersSchema() => new Dictionary<string, object?>
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
     {
-        ["type"] = "object",
-        ["properties"] = new Dictionary<string, object?>
-        {
-            ["summary"] = new Dictionary<string, object?>
-            {
-                ["type"] = "string",
-                ["description"] = "Optional one-sentence note about why the current phase is complete."
-            }
-        }
-    };
+        ["summary"] = NativeToolJson.StringProperty("Optional one-sentence note about why the current phase is complete.")
+    });
 
     public string ConvertArguments(JsonElement arguments)
     {
-        return arguments.ValueKind == JsonValueKind.Object
-            && arguments.TryGetProperty("summary", out JsonElement summary)
-            && summary.ValueKind == JsonValueKind.String
-            ? summary.GetString()?.Trim() ?? ""
+        return NativeToolJson.TryGetString(arguments, "summary", out var summary, allowEmpty: true)
+            ? summary.Trim()
             : "";
     }
 }

@@ -2,11 +2,26 @@ using System.Text.Json;
 
 namespace Fetch.Lsp;
 
-public sealed class LspSymbolSearchTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector, SearchContentTool fallback) : ITool
+public sealed class LspSymbolSearchTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector, SearchContentTool fallback) : ITool, INativeTool
 {
     private readonly AgentConfig _config = config; private readonly PathSandbox _sandbox = sandbox; private readonly LspServerSelector _selector = selector; private readonly SearchContentTool _fallback = fallback;
 
-    public string Name => "symbol_search"; public string Description => "Search code symbols such as classes, functions, methods, interfaces. Uses LSP if available, otherwise text search."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "symbol_search";
+    public string Description => "Search code symbols such as classes, functions, methods, interfaces from JSON arguments. Uses LSP if available, otherwise text search.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["query"] = NativeToolJson.StringProperty("Symbol query text.")
+    }, "query");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetString(arguments, "query", out var query)
+            ? query
+            : "";
+    }
+
     public async Task<string> RunAsync(string input)
     {
         LspServerConfig? server = _selector.SelectForRepo();
@@ -82,11 +97,38 @@ public sealed class LspSymbolSearchTool(AgentConfig config, PathSandbox sandbox,
 
 public sealed record ReferenceRequest(string File, int Line, int Character, string Symbol);
 
-public sealed class LspReferencesSearchTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector, SearchContentTool fallback) : ITool
+public sealed class LspReferencesSearchTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector, SearchContentTool fallback) : ITool, INativeTool
 {
     private readonly AgentConfig _config = config; private readonly PathSandbox _sandbox = sandbox; private readonly LspServerSelector _selector = selector; private readonly SearchContentTool _fallback = fallback;
 
-    public string Name => "references_search"; public string Description => "Find references/usages of a symbol. Uses LSP if available, otherwise text search. Input JSON {file,line,character,symbol}."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "references_search";
+    public string Description => "Find references or usages of a symbol from JSON arguments. Uses LSP if available, otherwise text search.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["file"] = NativeToolJson.StringProperty("Repo-relative file path containing the symbol."),
+        ["line"] = NativeToolJson.IntegerProperty("1-based line number of the symbol reference.", 1),
+        ["character"] = NativeToolJson.IntegerProperty("1-based character position of the symbol reference.", 1),
+        ["symbol"] = NativeToolJson.StringProperty("Exact symbol name.")
+    }, "file", "line", "character", "symbol");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetString(arguments, "file", out var file)
+            && NativeToolJson.TryGetInt(arguments, "line", out var line)
+            && NativeToolJson.TryGetInt(arguments, "character", out var character)
+            && NativeToolJson.TryGetString(arguments, "symbol", out var symbol)
+            ? NativeToolJson.SerializeObject(new Dictionary<string, object?>
+            {
+                ["file"] = file,
+                ["line"] = line,
+                ["character"] = character,
+                ["symbol"] = symbol
+            })
+            : "";
+    }
+
     public async Task<string> RunAsync(string input)
     {
         ReferenceRequest? req = ParseInput(input);

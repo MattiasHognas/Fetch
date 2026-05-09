@@ -2,13 +2,28 @@ using System.Text.Json;
 
 namespace Fetch.Tools;
 
-public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets, AgentConfig config) : ITool, IPreviewableTool
+public sealed class ApplyDiffTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets, AgentConfig config) : ITool, IPreviewableTool, INativeTool
 {
-    private readonly FileReadRegistry _registry = registry; private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets; private readonly AgentConfig _config = config;
+    private readonly FileReadRegistry _registry = registry;
+    private readonly PathSandbox _sandbox = sandbox;
+    private readonly SecretPolicy _secrets = secrets;
+    private readonly AgentConfig _config = config;
 
     public string Name => "apply_diff";
-    public string Description => "Apply an agent patch using *** Begin Patch format. Supports Add File, Update File, Delete File. Input may be the raw patch string or JSON like {\"patch\":\"*** Begin Patch...\"}.";
+    public string Description => "Apply an agent patch using JSON arguments with a patch string in *** Begin Patch format.";
     public ApprovalMode Approval => ApprovalMode.Ask;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["patch"] = NativeToolJson.StringProperty("Full V4A patch text beginning with '*** Begin Patch'.")
+    }, "patch");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetString(arguments, "patch", out var patch, allowEmpty: true)
+            ? patch
+            : "";
+    }
     public async Task<string> PreviewAsync(string input)
     {
         try

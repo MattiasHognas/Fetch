@@ -145,6 +145,8 @@ public sealed partial class AgentLoop
             var phaseDone = false;
             var phaseAttemptedMutation = false;
             var phaseHadSuccessfulMutation = false;
+            var phaseSatisfiedPinnedTodo = false;
+            ToolExecution? lastSuccessfulPhaseTool = null;
 
             for (var phaseStep = 0; phaseStep < _config.MaxStepsPerPhase && globalStep < _config.MaxAgentSteps; phaseStep++, globalStep++)
             {
@@ -251,7 +253,7 @@ public sealed partial class AgentLoop
                         var allowed = string.Join(", ", PhaseToolPolicy.AllowedToolNames(phase));
                         result = $"Tool '{toolName}' is not available in the {phase} phase. Allowed tools: {allowed}.";
                     }
-                    else if (TryEnforceCurrentTodoTool(currentTodo, toolName, phase, _state.CurrentTaskKind, phaseAttemptedMutation, out var currentTodoNudge))
+                    else if (TryEnforceCurrentTodoTool(currentTodo, toolName, phase, _state.CurrentTaskKind, phaseAttemptedMutation, phaseSatisfiedPinnedTodo, out var currentTodoNudge))
                     {
                         result = currentTodoNudge;
                     }
@@ -286,9 +288,9 @@ public sealed partial class AgentLoop
                                 phaseAttemptedMutation = true;
                             }
 
-                            if (toolName is "apply_diff" or "apply_patch" && IsJsonObjectInput(input))
+                            if (toolName == "apply_diff" && IsJsonObjectInput(input))
                             {
-                                result = "apply_diff/apply_patch input must be a raw V4A patch string starting with '*** Begin Patch', not a JSON object.";
+                                result = "apply_diff input must be a raw V4A patch string starting with '*** Begin Patch', not a JSON object.";
                             }
                             else
                             {
@@ -373,8 +375,17 @@ public sealed partial class AgentLoop
                                     }
 
                                     TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
-                                    if (_state.LastTool is { IsError: false })
+                                    if (_state.LastTool is { IsError: false } successfulTool)
                                     {
+                                        if (toolName != "phase_complete")
+                                        {
+                                            lastSuccessfulPhaseTool = successfulTool;
+                                            if (DidSatisfyPinnedTodo(currentTodo, toolName, result))
+                                            {
+                                                phaseSatisfiedPinnedTodo = true;
+                                            }
+                                        }
+
                                         if (MutationToolNames.Contains(toolName))
                                         {
                                             reportMutation(true);
@@ -492,6 +503,15 @@ public sealed partial class AgentLoop
             if (phaseDone)
             {
                 await AdvancePhaseTodoAsync(phase);
+                if (isLastPhase)
+                {
+                    ToolExecution? completionTool = lastSuccessfulPhaseTool ?? _state.LastTool;
+                    if (completionTool is { IsError: false }
+                        && await TryCompleteRunAsync(task, completionTool.Tool, completionTool.Input, completionTool.Result))
+                    {
+                        return;
+                    }
+                }
             }
             if (phase is AgentPhase.Editing && !phaseHadSuccessfulMutation)
             {
@@ -619,9 +639,20 @@ public sealed partial class AgentLoop
         return null;
     }
 
-    private static bool TryEnforceCurrentTodoTool(string currentTodo, string toolName, AgentPhase phase, TaskKind taskKind, bool phaseAttemptedMutation, out string nudge)
+    private static bool TryEnforceCurrentTodoTool(string currentTodo, string toolName, AgentPhase phase, TaskKind taskKind, bool phaseAttemptedMutation, bool phaseSatisfiedPinnedTodo, out string nudge)
     {
         nudge = "";
+        if (phaseSatisfiedPinnedTodo)
+        {
+            if (toolName == "phase_complete")
+            {
+                return false;
+            }
+
+            nudge = $"The active todo is '{currentTodo}' and it is already satisfied. Call phase_complete now instead of {toolName}.";
+            return true;
+        }
+
         if (phase is AgentPhase.Editing
             && phaseAttemptedMutation
             && taskKind is TaskKind.ArchitectureDocs or TaskKind.Documentation)
@@ -671,6 +702,17 @@ public sealed partial class AgentLoop
 
         toolNames = parsedTools;
         return true;
+    }
+
+    private static bool DidSatisfyPinnedTodo(string currentTodo, string toolName, string result)
+    {
+        return TryGetPinnedTodoTools(currentTodo, out IReadOnlyList<string> requiredTools)
+            && requiredTools.Any(requiredTool => string.Equals(requiredTool, toolName, StringComparison.Ordinal)) && toolName switch
+            {
+                _ when IsDiscoveryTool(toolName) => !IsDiscoveryFailure(result.TrimStart()),
+                "run_command" => result.Contains("\"ExitCode\": 0", StringComparison.Ordinal),
+                _ => true
+            };
     }
 
     private async Task SynthesizeFinalAsync(string task, TriageResult triage, string transcript, List<string> mutationLog)
@@ -1096,7 +1138,7 @@ public sealed partial class AgentLoop
         {
             "create_file" when TryGetCreateFilePath(input, out var createPath) && !IsDocumentationPath(createPath)
                 => FailDocumentationWrite("Architecture/documentation tasks must write a markdown file under docs/ such as docs/ARCHITECTURE.md. Do not modify source files for this step.", out failure),
-            "apply_patch" when TryGetDelimitedPath(input, out var patchPath) && !IsDocumentationPath(patchPath)
+            "apply_patch" when TryGetPathInput(input, out var patchPath) && !IsDocumentationPath(patchPath)
                 => FailDocumentationWrite("Architecture/documentation tasks must write a markdown file under docs/ such as docs/ARCHITECTURE.md. Do not modify source files for this step.", out failure),
             "apply_diff" when !LooksLikeDocumentationWrite(input)
                 => FailDocumentationWrite("Architecture/documentation tasks must target a docs markdown file such as docs/ARCHITECTURE.md. Provide a real *** Begin Patch payload with *** Add File or *** Update File, and do not modify .cs files.", out failure),
@@ -1227,7 +1269,7 @@ public sealed partial class AgentLoop
         return toolName switch
         {
             "create_file" => TryGetCreateFilePath(input, out var createPath) && IsDocumentationPath(createPath),
-            "apply_patch" => TryGetDelimitedPath(input, out var patchPath) && IsDocumentationPath(patchPath),
+            "apply_patch" => TryGetPathInput(input, out var patchPath) && IsDocumentationPath(patchPath),
             "apply_diff" => TryGetDiffPaths(input).Any(IsDocumentationPath) || LooksLikeDocumentationWrite(input),
             _ => false
         };
@@ -1270,12 +1312,15 @@ public sealed partial class AgentLoop
             || result.StartsWith("Grounding required before writing documentation.", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool TryGetCreateFilePath(string input, out string path) => TryGetDelimitedPath(input, out path);
-
-    private static bool TryGetDelimitedPath(string input, out string path)
+    private static bool TryGetCreateFilePath(string input, out string path)
     {
-        var parts = input.Split("|||", 2);
-        path = parts.Length == 0 ? "" : parts[0].Trim();
+        path = TryExtractPathInput(input) ?? "";
+        return !string.IsNullOrWhiteSpace(path);
+    }
+
+    private static bool TryGetPathInput(string input, out string path)
+    {
+        path = TryExtractPathInput(input) ?? "";
         return !string.IsNullOrWhiteSpace(path);
     }
 

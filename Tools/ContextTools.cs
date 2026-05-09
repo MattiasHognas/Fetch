@@ -2,27 +2,36 @@ using System.Text.Json;
 
 namespace Fetch.Tools;
 
-public sealed class ContextPackTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets, AgentConfig config) : ITool
+public sealed class ContextPackTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets, AgentConfig config) : ITool, INativeTool
 {
-    private readonly FileReadRegistry _registry = registry; private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets; private readonly AgentConfig _config = config;
+    private readonly FileReadRegistry _registry = registry;
+    private readonly PathSandbox _sandbox = sandbox;
+    private readonly SecretPolicy _secrets = secrets;
+    private readonly AgentConfig _config = config;
 
-    public string Name => "context_pack"; public string Description => "Pack multiple files into one bounded context. Input: one repo-relative path per line."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "context_pack";
+    public string Description => "Pack multiple files into one bounded context from JSON arguments.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["files"] = NativeToolJson.ArrayProperty(NativeToolJson.StringProperty("Repo-relative file path."), "Files to pack into the bounded context.", 1)
+    }, "files");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetStringArray(arguments, "files", out var files)
+            ? NativeToolJson.Serialize(files)
+            : "";
+    }
+
     public async Task<string> RunAsync(string input)
     {
-        if (string.IsNullOrWhiteSpace(input))
+        if (!TryParseFiles(input, out var rawLines))
         {
-            return "No files requested.";
-        }
-        if (input.Contains("|||", StringComparison.Ordinal))
-        {
-            return "Invalid input. context_pack expects one repo-relative path per line, not path|||content. To create or edit a file, use apply_diff.";
-        }
-        if (input.Contains("```", StringComparison.Ordinal))
-        {
-            return "Invalid input. context_pack does not accept fenced code blocks. Provide one repo-relative path per line.";
+            return "Invalid input. Provide JSON {\"files\":[\"path/to/file.cs\",\"Other/File.cs\"]}.";
         }
 
-        var rawLines = input.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var paths = new List<string>();
         var rejected = new List<string>();
         foreach (var line in rawLines)
@@ -45,7 +54,7 @@ public sealed class ContextPackTool(FileReadRegistry registry, PathSandbox sandb
         }
         if (paths.Count == 0)
         {
-            var hint = rejected.Count > 0 ? $" Rejected lines did not look like file paths (e.g. '{rejected[0]}'). Provide one repo-relative path per line." : "";
+            var hint = rejected.Count > 0 ? $" Rejected entries did not look like file paths (e.g. '{rejected[0]}'). Provide a JSON files array with repo-relative paths." : "";
             return "No valid files requested." + hint;
         }
 
@@ -76,6 +85,25 @@ public sealed class ContextPackTool(FileReadRegistry registry, PathSandbox sandb
         return string.Join("\n\n", chunks);
     }
 
+    private static bool TryParseFiles(string input, out string[] files)
+    {
+        files = [];
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        try
+        {
+            files = JsonSerializer.Deserialize<string[]>(input, AgentConfig.JsonOptions()) ?? [];
+            return files.Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool LooksLikePath(string line)
     {
         if (string.IsNullOrWhiteSpace(line))
@@ -98,11 +126,33 @@ public sealed class ContextPackTool(FileReadRegistry registry, PathSandbox sandb
 
 public sealed record FileRangeRequest(string File, int? Start, int? End);
 
-public sealed class FileRangeContextTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets) : ITool
+public sealed class FileRangeContextTool(FileReadRegistry registry, PathSandbox sandbox, SecretPolicy secrets) : ITool, INativeTool
 {
-    private readonly FileReadRegistry _registry = registry; private readonly PathSandbox _sandbox = sandbox; private readonly SecretPolicy _secrets = secrets;
+    private readonly FileReadRegistry _registry = registry;
+    private readonly PathSandbox _sandbox = sandbox;
+    private readonly SecretPolicy _secrets = secrets;
 
-    public string Name => "read_ranges"; public string Description => "Read specific line ranges. Input JSON: [{file,start,end}] or {file,start,end}."; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "read_ranges";
+    public string Description => "Read specific line ranges from JSON arguments.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["ranges"] = NativeToolJson.ArrayProperty(NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+        {
+            ["file"] = NativeToolJson.StringProperty("Repo-relative file path."),
+            ["start"] = NativeToolJson.IntegerProperty("Optional 1-based start line.", 1),
+            ["end"] = NativeToolJson.IntegerProperty("Optional 1-based end line.", 1)
+        }, "file"), "File ranges to read.", 1)
+    }, "ranges");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetElement(arguments, "ranges", out JsonElement ranges) && ranges.ValueKind == JsonValueKind.Array
+            ? ranges.GetRawText()
+            : "";
+    }
+
     public async Task<string> RunAsync(string input)
     {
         List<FileRangeRequest>? ranges;
@@ -240,16 +290,57 @@ public sealed class ContextRefiner(LlmClient llm, PromptCatalog prompts)
     }
 }
 
-public sealed class RefineContextTool(ContextRefiner refiner) : ITool
+public sealed class RefineContextTool(ContextRefiner refiner) : ITool, INativeTool
 {
     private readonly ContextRefiner _refiner = refiner;
 
-    public string Name => "refine_context"; public string Description => "Given task and search results, choose exact file line ranges. Input: TASK\n---\nSEARCH_RESULTS"; public ApprovalMode Approval => ApprovalMode.Auto;
+    public string Name => "refine_context";
+    public string Description => "Given task and search results, choose exact file line ranges from JSON arguments.";
+    public ApprovalMode Approval => ApprovalMode.Auto;
+
+    public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
+    {
+        ["task"] = NativeToolJson.StringProperty("Task description."),
+        ["searchResults"] = NativeToolJson.StringProperty("Search results text to refine.")
+    }, "task", "searchResults");
+
+    public string ConvertArguments(JsonElement arguments)
+    {
+        return NativeToolJson.TryGetString(arguments, "task", out var task)
+            && NativeToolJson.TryGetString(arguments, "searchResults", out var searchResults, allowEmpty: true)
+            ? NativeToolJson.SerializeObject(new Dictionary<string, object?>
+            {
+                ["task"] = task,
+                ["searchResults"] = searchResults
+            })
+            : "";
+    }
+
     public async Task<string> RunAsync(string input)
     {
-        var parts = input.Split("---", 2);
-        return parts.Length != 2
-            ? "Invalid input. Use: TASK\\n---\\nSEARCH_RESULTS"
-            : await _refiner.RefineAsync(parts[0].Trim(), parts[1].Trim());
+        return !TryParseInput(input, out var task, out var searchResults)
+            ? "Invalid input. Provide JSON {\"task\":\"...\",\"searchResults\":\"...\"}."
+            : await _refiner.RefineAsync(task, searchResults);
+    }
+
+    private static bool TryParseInput(string input, out string task, out string searchResults)
+    {
+        task = "";
+        searchResults = "";
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(input);
+            return NativeToolJson.TryGetString(doc.RootElement, "task", out task)
+                && NativeToolJson.TryGetString(doc.RootElement, "searchResults", out searchResults, allowEmpty: true);
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
