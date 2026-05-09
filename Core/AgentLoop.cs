@@ -125,7 +125,7 @@ public sealed partial class AgentLoop
                 index = phaseIndex,
                 of = phases.Count
             });
-            transcript = BuildPhasePrompt(task, triage, phase, transcript);
+            transcript = await BuildPhasePromptAsync(task, triage, phase, transcript);
 
             var repeatedBlockedToolCalls = 0;
             var phaseDone = false;
@@ -308,12 +308,13 @@ public sealed partial class AgentLoop
                             ? Record(tool, input, groundingFailure, true)
                             : await ExecuteToolAsync(tool, input);
                     _events.Add(AgentEventType.ToolResult, $"Tool result: {toolName}", result, toolName, input);
+                    var trimmedResult = await TrimToolResultAsync(result);
                     await _logger.LogAsync("tool_result", new
                     {
                         phase = phase.ToString(),
                         step = phaseStep,
                         tool = toolName,
-                        result = TrimToolResult(result)
+                        result = trimmedResult
                     });
                     repeatedBlockedToolCalls = result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
                         || result.StartsWith("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)
@@ -405,7 +406,7 @@ public sealed partial class AgentLoop
                             failedRuns = 0;
                         }
                     }
-                    transcript += $"\n\nAssistant tool call:\n{cleaned}\n\nTool result:\n{TrimToolResult(result)}\n"
+                    transcript += $"\n\nAssistant tool call:\n{cleaned}\n\nTool result:\n{trimmedResult}\n"
                         + (analysis is null ? "" : $"\nCommand analysis:\n{analysis}\n")
                         + (recoveryGuidance is null ? "" : $"\nRecovery guidance:\n{recoveryGuidance}\n");
                 }
@@ -1164,11 +1165,11 @@ public sealed partial class AgentLoop
             || normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
     }
 
-    private string BuildPhasePrompt(string task, TriageResult triage, AgentPhase phase, string priorTranscript)
+    private async Task<string> BuildPhasePromptAsync(string task, TriageResult triage, AgentPhase phase, string priorTranscript)
     {
         var recentState = string.IsNullOrWhiteSpace(priorTranscript)
-            ? (string.IsNullOrWhiteSpace(_session.ReadSummary()) ? "(none)" : Trim(_session.ReadSummary(), _config.MaxRecentStateChars))
-            : Trim(priorTranscript, _config.MaxRecentStateChars);
+            ? (string.IsNullOrWhiteSpace(_session.ReadSummary()) ? "(none)" : await TrimRecentStateAsync(_session.ReadSummary()))
+            : await TrimRecentStateAsync(priorTranscript);
         var thinkingHint = _config.EnableThinking && LlmClient.IsThinkingModel(_config.ModelName)
             ? "\nUse step-by-step thinking (<think>...</think>) before emitting the JSON. The <think> block will be stripped before parsing.\n"
             : "";
@@ -1212,9 +1213,101 @@ public sealed partial class AgentLoop
         return cut < 0 ? description : description[..(cut + 1)].Trim();
     }
 
-    private static string Trim(string text, int maxChars) =>
-        text.Length <= maxChars ? text : text[^maxChars..];
-    private string TrimToolResult(string text) => text.Length <= _config.MaxToolResultChars ? text : text[.._config.MaxToolResultChars] + "\n[tool result truncated]";
+    private async Task<string> TrimRecentStateAsync(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return text;
+        }
+
+        var candidate = TrimByChars(text, _config.MaxRecentStateChars, keepTail: true);
+        if (_config.MaxRecentStateTokens <= 0)
+        {
+            return candidate;
+        }
+
+        (var Text, var _) = await TrimToTokenBudgetAsync(candidate, _config.MaxRecentStateTokens, keepTail: true);
+        return Text;
+    }
+
+    private async Task<string> TrimToolResultAsync(string text)
+    {
+        const string marker = "\n[tool result truncated]";
+        if (string.IsNullOrEmpty(text))
+        {
+            return text;
+        }
+
+        var candidate = text;
+        var truncated = false;
+        if (_config.MaxToolResultChars > 0 && candidate.Length > _config.MaxToolResultChars)
+        {
+            candidate = candidate[.._config.MaxToolResultChars];
+            truncated = true;
+        }
+
+        if (_config.MaxToolResultTokens <= 0)
+        {
+            return truncated ? candidate + marker : candidate;
+        }
+
+        var candidateTokens = await _llm.CountPromptTokensAsync(candidate);
+        if (!truncated && candidateTokens <= _config.MaxToolResultTokens)
+        {
+            return candidate;
+        }
+
+        var markerTokens = await _llm.CountPromptTokensAsync(marker);
+        var contentBudget = Math.Max(0, _config.MaxToolResultTokens - markerTokens);
+
+        (var Text, var _) = await TrimToTokenBudgetAsync(candidate, contentBudget, keepTail: false);
+        return Text + marker;
+    }
+
+    private async Task<(string Text, bool Truncated)> TrimToTokenBudgetAsync(string text, int maxTokens, bool keepTail)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return (text, false);
+        }
+
+        if (maxTokens <= 0)
+        {
+            return ("", text.Length > 0);
+        }
+
+        var tokenCount = await _llm.CountPromptTokensAsync(text);
+        if (tokenCount <= maxTokens)
+        {
+            return (text, false);
+        }
+
+        var low = 0;
+        var high = text.Length;
+        var best = "";
+        while (low <= high)
+        {
+            var mid = low + ((high - low) / 2);
+            var candidate = Slice(text, mid, keepTail);
+            var candidateTokens = await _llm.CountPromptTokensAsync(candidate);
+            if (candidateTokens <= maxTokens)
+            {
+                best = candidate;
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        return (best, true);
+    }
+
+    private static string TrimByChars(string text, int maxChars, bool keepTail) => maxChars <= 0 || text.Length <= maxChars ? text : keepTail ? text[^maxChars..] : text[..maxChars];
+
+    private static string Slice(string text, int length, bool keepTail) => length <= 0 ? "" : length >= text.Length ? text : keepTail ? text[^length..] : text[..length];
+
     private string? LoadAgentContext()
     {
         var chunks = new List<string>();

@@ -67,7 +67,7 @@ dotnet run -- chat
 dotnet run -- agent "fix failing tests"
 ```
 
-The default config now targets chat completions with Qwen, native tool calling, reasoning preservation, and a 100k context window. Keep the larger tool/context limits if you want the agent to benefit from that wider context.
+The default config now targets chat completions with Qwen, native tool calling, reasoning preservation, and a 100k context window. Prompt-facing budgets now expose token settings for recent state and tool results, while the older char limits remain as compatibility caps. Keep the larger tool/context limits if you want the agent to benefit from that wider context.
 
 Useful slash commands in chat mode:
 

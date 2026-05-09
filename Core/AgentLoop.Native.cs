@@ -59,7 +59,7 @@ public sealed partial class AgentLoop
             IReadOnlyList<NativeToolDefinition> toolDefinitions = ToolSchemaRegistry.BuildDefinitions(phaseTools);
             var messages = new List<LlmChatMessage>
             {
-                new("system", BuildNativePhasePrompt(task, triage, phase, transcript, currentTodo, completedTodos)),
+                new("system", await BuildNativePhasePromptAsync(task, triage, phase, transcript, currentTodo, completedTodos)),
                 new("user", $"Continue the {phase} phase for the current task. Use tools when needed. Reply with PHASE_DONE only when this phase is complete.")
             };
 
@@ -304,22 +304,23 @@ public sealed partial class AgentLoop
                         }
                     }
 
+                    var trimmedResult = await TrimToolResultAsync(result);
                     _events.Add(AgentEventType.ToolResult, $"Tool result: {toolName}", result, toolName, string.IsNullOrWhiteSpace(input) ? null : input);
                     await _logger.LogAsync("tool_result", new
                     {
                         phase = phase.ToString(),
                         step = phaseStep,
                         tool = toolName,
-                        result = TrimToolResult(result),
+                        result = trimmedResult,
                         mode = "native_tools",
                         executedTool
                     });
                     transcript += string.IsNullOrWhiteSpace(input)
-                        ? $"\n\nAssistant tool call:\n{toolName}\n\nTool result:\n{TrimToolResult(result)}\n"
-                        : $"\n\nAssistant tool call:\n{{\"tool\":\"{toolName}\",\"input\":{JsonSerializer.Serialize(input)}}}\n\nTool result:\n{TrimToolResult(result)}\n"
+                        ? $"\n\nAssistant tool call:\n{toolName}\n\nTool result:\n{trimmedResult}\n"
+                        : $"\n\nAssistant tool call:\n{{\"tool\":\"{toolName}\",\"input\":{JsonSerializer.Serialize(input)}}}\n\nTool result:\n{trimmedResult}\n"
                             + (analysis is null ? "" : $"\nCommand analysis:\n{analysis}\n")
                             + (BuildRecoveryGuidance(toolName, result) is { } recovery ? $"\nRecovery guidance:\n{recovery}\n" : "");
-                    messages.Add(new LlmChatMessage("tool", result, ToolName: toolName));
+                    messages.Add(new LlmChatMessage("tool", trimmedResult, ToolName: toolName));
                     if (phaseDone)
                     {
                         break;
@@ -361,11 +362,11 @@ public sealed partial class AgentLoop
         await SynthesizeFinalAsync(task, triage, transcript, mutationLog);
     }
 
-    private string BuildNativePhasePrompt(string task, TriageResult triage, AgentPhase phase, string priorTranscript, string currentTodo, string completedTodos)
+    private async Task<string> BuildNativePhasePromptAsync(string task, TriageResult triage, AgentPhase phase, string priorTranscript, string currentTodo, string completedTodos)
     {
         var recentState = string.IsNullOrWhiteSpace(priorTranscript)
-            ? (string.IsNullOrWhiteSpace(_session.ReadSummary()) ? "(none)" : Trim(_session.ReadSummary(), _config.MaxRecentStateChars))
-            : Trim(priorTranscript, _config.MaxRecentStateChars);
+            ? (string.IsNullOrWhiteSpace(_session.ReadSummary()) ? "(none)" : await TrimRecentStateAsync(_session.ReadSummary()))
+            : await TrimRecentStateAsync(priorTranscript);
         var thinkingHint = _config.EnableThinking && LlmClient.IsThinkingModel(_config.ModelName)
             ? "\nPreserve useful reasoning across tool calls and use it to decide the next action.\n"
             : "";

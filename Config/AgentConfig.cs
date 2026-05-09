@@ -34,7 +34,9 @@ public sealed class AgentConfig
     public int DefaultCommandTimeoutSeconds { get; set; } = 60;
     public int MaxCommandTimeoutSeconds { get; set; } = 600;
     public int MaxToolResultChars { get; set; } = 40000;
+    public int MaxToolResultTokens { get; set; } = 10000;
     public int MaxRecentStateChars { get; set; } = 24000;
+    public int MaxRecentStateTokens { get; set; } = 6000;
     public int MaxRoutingTranscriptChars { get; set; } = 40000;
     public int MaxContextPackFiles { get; set; } = 12;
     public int MaxContextPackTotalChars { get; set; } = 80000;
