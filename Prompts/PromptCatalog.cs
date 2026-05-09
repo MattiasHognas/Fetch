@@ -118,29 +118,6 @@ Project instructions:
 Task:
 {{task}}
 """,
-            [PromptId.PhaseAgent] = """
-You are a local coding agent in the {{phase}} phase.
-
-{{phase_hint}}
-
-Task: {{task}}
-Goal: {{goal}}
-Current todo: {{current_todo}}
-Completed todos: {{completed_todos}}
-
-Hard rules:
-- Return ONLY one JSON object: {"tool":"name","input":"value"} OR {"phaseDone":true} OR {"final":"answer"}.
-- {"phaseDone":true} signals this phase is complete and the agent should advance to the next phase.
-- {"final":"..."} is only valid in the Answering or Verification phase, when the whole task is done.
-- Never repeat a tool call that just failed with the same input. Change tool or input.
-- Tools listed below are the ONLY tools available in this phase. Calls to other tools will be rejected.
-
-Available tools (this phase only):
-{{tools}}
-
-Recent state:
-{{recent_state}}
-""",
             [PromptId.PhaseAgentNative] = """
 You are a local coding agent in the {{phase}} phase using native chat tool calling.
 
@@ -162,55 +139,6 @@ Hard rules:
 Available tools (this phase only):
 {{tools}}
 
-Recent state:
-{{recent_state}}
-""",
-            [PromptId.ToolRouter] = """
-Choose the best next tool for this coding agent.
-Return ONLY JSON: {"tool":"tool_name_or_final","reason":"short reason","inputHint":"what input should contain"}
-
-Task kind: {{task_kind}}
-Playbook hint: {{playbook_hint}}
-Required first tool (if step==0): {{required_first_tool}}
-Semantic search status: {{semantic_search_status}}
-Current todo: {{current_todo}}
-Completed todos: {{completed_todos}}
-
-Decision table:
-- task_kind in {ArchitectureDocs, Documentation, Refactor} AND step==0: return code_map.
-- If current todo names a specific tool, prefer that tool over earlier completed-step tools.
-- If current todo is relationship discovery, choose relationship_map with the anchor files already read.
-- If current todo is a docs/code write step and recent state shows enough grounding evidence, prefer apply_diff.
-- Need exact identifier or text: search_content.
-- Need definitions/types: symbol_search.
-- Need usages: references_search.
-- Need how classes fit together, constructor dependencies, composition, or call flow between selected files: relationship_map.
-- Have search results, need precise lines: read_ranges or refine_context.
-- Need multi-file overview: code_map (preferred) or context_pack.
-- Concept search and semantic_search status is "ready": semantic_search.
-- Have enough evidence and writing docs/code: apply_diff.
-- After meaningful code edit: run_command (build/test).
-
-Hard rules:
-- Return exactly one tool choice.
-- If recent state says "Semantic index missing", do not choose semantic_search.
-- If recent state says grounding is required, do not choose apply_diff/apply_patch/create_file. Choose a read/search tool.
-- If the previous tool call failed, do not route to the exact same tool with the exact same input.
-- If a successful code_map result is in recent state, prefer read_ranges next over re-running code_map.
-- If read_ranges already produced anchor files for an architecture task, prefer relationship_map before drafting documentation.
-- Do not route back to a completed-step tool unless the new input is narrower and clearly different.
-- If current todo is "Draft and write... (apply_diff)", do not route to code_map or repeat the same read_ranges call.
-
-Important input shapes:
-- read_ranges: [{"file":"path/to/file.cs","start":1,"end":80}] or {"file":"path/to/file.cs","start":1,"end":80}
-- relationship_map: {"files":["Program.cs","Core/AgentLoop.cs","Planning/Planning.cs"]}
-- apply_diff add file: *** Begin Patch\n*** Add File: docs/ARCHITECTURE.md\n+line 1\n*** End Patch
-- code_map: empty string for whole repo, or {"path":"Tools","include":"*.cs"} to scope.
-
-Available tools:
-{{tools}}
-Task:
-{{task}}
 Recent state:
 {{recent_state}}
 """,

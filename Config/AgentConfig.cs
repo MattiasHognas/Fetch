@@ -7,8 +7,6 @@ public sealed class AgentConfig
     public string ConfigPath { get; set; } = "";
     public string ModelBaseUrl { get; set; } = "http://localhost:11434";
     public string ModelName { get; set; } = "qwen3.6:35b";
-    public string ModelTransport { get; set; } = "chat";
-    public bool EnableNativeToolCalls { get; set; } = true;
     public bool PreserveReasoning { get; set; } = true;
     public bool? ProviderPreserveThinking
     {
@@ -37,7 +35,6 @@ public sealed class AgentConfig
     public int MaxToolResultTokens { get; set; } = 10000;
     public int MaxRecentStateChars { get; set; } = 24000;
     public int MaxRecentStateTokens { get; set; } = 6000;
-    public int MaxRoutingTranscriptChars { get; set; } = 40000;
     public int MaxContextPackFiles { get; set; } = 12;
     public int MaxContextPackTotalChars { get; set; } = 80000;
     public int MaxContextPackFileChars { get; set; } = 20000;

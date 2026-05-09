@@ -5,7 +5,7 @@ namespace Fetch.Core;
 
 public sealed partial class AgentLoop
 {
-    private readonly LlmClient _llm; private readonly Dictionary<string, ITool> _tools; private readonly SessionLogger _logger; private readonly TodoStore _todoStore; private readonly AgentConfig _config; private readonly PromptCatalog _prompts; private readonly AgentSession _session; private readonly AgentRuntimeState _state; private readonly AgentEventStore _events; private readonly SemanticIndex _semanticIndex; private readonly TriageRunner _triage; private readonly ToolRouter _router; private readonly CommandResultAnalyzer _analyzer; private readonly TranscriptCompactor _compactor; private readonly ApprovalPolicy _approvalPolicy; private readonly string? _agentMd;
+    private readonly LlmClient _llm; private readonly Dictionary<string, ITool> _tools; private readonly SessionLogger _logger; private readonly TodoStore _todoStore; private readonly AgentConfig _config; private readonly PromptCatalog _prompts; private readonly AgentSession _session; private readonly AgentRuntimeState _state; private readonly AgentEventStore _events; private readonly SemanticIndex _semanticIndex; private readonly TriageRunner _triage; private readonly CommandResultAnalyzer _analyzer; private readonly TranscriptCompactor _compactor; private readonly ApprovalPolicy _approvalPolicy; private readonly string? _agentMd;
     private static readonly HashSet<string> MutationToolNames = new(StringComparer.Ordinal) { "apply_diff", "apply_patch", "create_file", "delete_file", "rename_file" };
     private static int _reindexInFlight;
 
@@ -22,7 +22,6 @@ public sealed partial class AgentLoop
         _events = events;
         _semanticIndex = semanticIndex;
         _triage = triage;
-        _router = new ToolRouter(llm, prompts, config);
         _analyzer = new CommandResultAnalyzer(llm, prompts);
         _compactor = new TranscriptCompactor(llm, prompts);
         _approvalPolicy = new ApprovalPolicy(config);
@@ -34,7 +33,7 @@ public sealed partial class AgentLoop
         var mutated = false;
         try
         {
-            await (_llm.SupportsNativeToolCalling ? RunNativeAsync(task, m => mutated = mutated || m) : RunInnerAsync(task, m => mutated = mutated || m));
+            await RunNativeAsync(task, m => mutated = mutated || m);
         }
         finally
         {
@@ -82,12 +81,15 @@ public sealed partial class AgentLoop
         });
     }
 
-    private async Task RunInnerAsync(string task, Action<bool> reportMutation)
+    private ToolSchemaRegistry NativeToolRegistry => field ??= new ToolSchemaRegistry(_tools.Values);
+
+    private async Task RunNativeAsync(string task, Action<bool> reportMutation)
     {
         _events.Add(AgentEventType.UserInput, "User", task);
         await _logger.LogAsync("user_task", new
         {
-            task
+            task,
+            mode = "native_tools"
         });
         TriageResult triage = await _triage.RunAsync(task, _agentMd);
         _state.CurrentTaskKind = triage.Kind;
@@ -100,7 +102,8 @@ public sealed partial class AgentLoop
             phases = triage.Plan.Phases.Select(p => p.ToString()).ToArray(),
             isGreenfield = triage.Plan.IsGreenfield,
             goal = triage.Goal,
-            llmRaw = triage.LlmRaw
+            llmRaw = triage.LlmRaw,
+            mode = "native_tools"
         });
 
         await SeedPhaseTodosAsync(triage.Plan);
@@ -123,292 +126,287 @@ public sealed partial class AgentLoop
             {
                 phase = phase.ToString(),
                 index = phaseIndex,
-                of = phases.Count
+                of = phases.Count,
+                mode = "native_tools"
             });
-            transcript = await BuildPhasePromptAsync(task, triage, phase, transcript);
+
+            transcript = await CompactTranscriptIfNeededAsync(transcript, phase);
+            (var currentTodo, var completedTodos) = await GetTodoRoutingStateAsync();
+            ITool[] phaseTools = [.. PhaseToolPolicy.Filter(_tools.Values, phase)];
+            IReadOnlyList<NativeToolDefinition> toolDefinitions = ToolSchemaRegistry.BuildDefinitions(phaseTools);
+            var messages = new List<LlmChatMessage>
+            {
+                new("system", await BuildNativePhasePromptAsync(task, triage, phase, transcript, currentTodo, completedTodos)),
+                new("user", $"Continue the {phase} phase for the current task. Use tools when needed. Reply with PHASE_DONE only when this phase is complete.")
+            };
 
             var repeatedBlockedToolCalls = 0;
             var phaseDone = false;
             var phaseHadSuccessfulMutation = false;
+
             for (var phaseStep = 0; phaseStep < _config.MaxStepsPerPhase && globalStep < _config.MaxAgentSteps; phaseStep++, globalStep++)
             {
-                transcript = await CompactTranscriptIfNeededAsync(task, transcript, phase);
-                transcript += $"\n\nPhase {phase} step {phaseStep + 1} of {_config.MaxStepsPerPhase} (global {globalStep + 1}/{_config.MaxAgentSteps}).\n";
-                (var currentTodo, var completedTodos) = await GetTodoRoutingStateAsync();
-                IEnumerable<ITool> phaseTools = PhaseToolPolicy.Filter(_tools.Values, phase);
-                var route = await _router.ChooseAsync(task, transcript, phaseTools, _state.SemanticSearchReady, phase, currentTodo, completedTodos);
-                await _logger.LogAsync("tool_route", new
+                LlmChatResponse response = await _llm.ChatWithToolsAsync(messages, toolDefinitions);
+                if (!string.IsNullOrWhiteSpace(response.Reasoning))
                 {
-                    phase = phase.ToString(),
-                    step = phaseStep,
-                    route
-                });
-                transcript += $"\n\nTool routing hint:\n{route}\n";
-                transcript = await CompactTranscriptIfNeededAsync(task, transcript, phase);
-                var response = await _llm.ChatAsync(transcript);
-                _events.Add(AgentEventType.LlmResponse, "LLM response", response);
+                    _events.Add(AgentEventType.Reasoning, $"Reasoning: {phase}", response.Reasoning);
+                    await _logger.LogAsync("llm_reasoning", new
+                    {
+                        phase = phase.ToString(),
+                        step = phaseStep,
+                        reasoning = response.Reasoning
+                    });
+                }
+
+                _events.Add(AgentEventType.LlmResponse, "LLM response", string.IsNullOrWhiteSpace(response.Content) ? "(tool call)" : response.Content);
                 await _logger.LogAsync("llm_response", new
                 {
                     phase = phase.ToString(),
                     step = phaseStep,
-                    response
+                    content = response.Content,
+                    reasoning = response.Reasoning,
+                    toolCalls = response.ToolCalls.Select(t => new { t.Name, t.ArgumentsJson }).ToArray()
                 });
-                if (!JsonHelper.TryParseObject(response, out JsonDocument? doc, out var cleaned) || doc is null)
+
+                messages.Add(new LlmChatMessage("assistant", response.Content, response.Reasoning, ToolCalls: response.ToolCalls));
+
+                if (response.ToolCalls.Count == 0)
                 {
-                    transcript += LooksLikeDraftContent(response)
-                        ? "\nThat was prose or draft content, not an executable step. Your next response must be exactly one JSON tool call."
-                        : "\nReturn ONLY one valid JSON object: {\"tool\":\"name\",\"input\":\"value\"} OR {\"phaseDone\":true} OR {\"final\":\"answer\"}.";
-                    await _logger.LogAsync("error", new
-                    {
-                        phase = phase.ToString(),
-                        step = phaseStep,
-                        kind = "invalid_json",
-                        response
-                    });
-                    continue;
-                }
-                using (doc)
-                {
-                    JsonElement root = doc.RootElement;
-                    if (root.TryGetProperty("phaseDone", out JsonElement pd) && pd.ValueKind == JsonValueKind.True)
+                    var content = response.Content.Trim();
+                    if (string.Equals(content, "PHASE_DONE", StringComparison.Ordinal))
                     {
                         if (phase is AgentPhase.Discovery && !hasGroundingEvidence)
                         {
-                            transcript += "\nphaseDone rejected: Discovery requires at least one grounding tool result (code_map, read_ranges, search_content, symbol_search, references_search, or semantic_search) before advancing. Call one of those tools now.";
-                            await _logger.LogAsync("phase_done_rejected", new
-                            {
-                                phase = phase.ToString(),
-                                step = phaseStep,
-                                reason = "no_grounding_evidence"
-                            });
+                            messages.Add(new LlmChatMessage("user", "PHASE_DONE rejected: gather grounding evidence with a read/search tool before advancing."));
                             continue;
                         }
+
                         if (phase is AgentPhase.Editing && !phaseHadSuccessfulMutation)
                         {
-                            transcript += "\nphaseDone rejected: Editing requires at least one successful mutation (apply_diff, apply_patch, create_file, delete_file, or rename_file) before advancing. Read the target file, then call apply_diff with a real *** Begin Patch payload whose '-' lines match the file byte-for-byte. Do not return phaseDone until a mutation succeeds.";
-                            await _logger.LogAsync("phase_done_rejected", new
-                            {
-                                phase = phase.ToString(),
-                                step = phaseStep,
-                                reason = "no_successful_mutation"
-                            });
+                            messages.Add(new LlmChatMessage("user", "PHASE_DONE rejected: Editing requires at least one successful file mutation before advancing."));
                             continue;
                         }
+
                         await _logger.LogAsync("phase_done_signal", new
                         {
                             phase = phase.ToString(),
-                            step = phaseStep
+                            step = phaseStep,
+                            mode = "native_tools"
                         });
                         phaseDone = true;
                         break;
                     }
-                    if (root.TryGetProperty("final", out JsonElement final))
+
+                    var canFinal = isLastPhase || phase is AgentPhase.Answering || phase is AgentPhase.Verification;
+                    if (canFinal && !ShouldRejectPrematureFinal(content, phaseStep))
                     {
-                        var text = ReadJsonValue(final);
-                        var canFinal = isLastPhase || phase is AgentPhase.Answering;
-                        if (!canFinal || ShouldRejectPrematureFinal(text, phaseStep))
-                        {
-                            transcript += canFinal
-                                ? "\nDo not return final for a plan or partial progress. If work remains, return a tool call. To advance to the next phase, return {\"phaseDone\":true}."
-                                : $"\nFinal answers are only allowed in the last phase or the Answering phase. The current phase is {phase}. Continue with a tool call or return {{\"phaseDone\":true}} to advance.";
-                            await _logger.LogAsync("error", new
-                            {
-                                phase = phase.ToString(),
-                                step = phaseStep,
-                                kind = "premature_final",
-                                text
-                            });
-                            continue;
-                        }
-                        _events.Add(AgentEventType.Final, "Final", text);
+                        _events.Add(AgentEventType.Final, "Final", content);
                         await _logger.LogAsync("final", new
                         {
-                            text
+                            text = content,
+                            mode = "native_tools"
                         });
-                        Console.WriteLine(text);
+                        Console.WriteLine(content);
                         return;
                     }
-                    if (!root.TryGetProperty("tool", out JsonElement t) || !root.TryGetProperty("input", out JsonElement inp))
-                    {
-                        transcript += root.TryGetProperty("tool", out _) && (root.TryGetProperty("reason", out _) || root.TryGetProperty("inputHint", out _))
-                            ? "\nThat was a router-style suggestion, not an executable tool call. Execute exactly one tool now and include a real input value as {\"tool\":\"name\",\"input\":\"value\"}."
-                            : "\nReturn either {\"tool\":\"name\",\"input\":\"value\"}, {\"phaseDone\":true}, or {\"final\":\"answer\"}.";
-                        continue;
-                    }
-                    var toolName = t.ValueKind == JsonValueKind.String ? t.GetString() ?? "" : "";
-                    var input = ReadJsonValue(inp);
+
+                    messages.Add(new LlmChatMessage("user", canFinal
+                        ? "If the task is complete, return the final answer. Otherwise call a tool to continue working."
+                        : "If work remains in this phase, call a tool. Reply with PHASE_DONE only when the phase is actually complete."));
+                    continue;
+                }
+
+                foreach (LlmToolCall toolCall in response.ToolCalls)
+                {
+                    var toolName = toolCall.Name;
+                    var input = "";
+                    var result = "";
+                    string? analysis = null;
+                    var executedTool = false;
 
                     if (!PhaseToolPolicy.IsAllowed(toolName, phase))
                     {
                         var allowed = string.Join(", ", PhaseToolPolicy.AllowedToolNames(phase));
-                        transcript += $"\nTool '{toolName}' is not available in the {phase} phase. Allowed tools: {allowed}. Either choose an allowed tool or return {{\"phaseDone\":true}} to advance.";
-                        await _logger.LogAsync("phase_tool_blocked", new
+                        result = $"Tool '{toolName}' is not available in the {phase} phase. Allowed tools: {allowed}.";
+                    }
+                    else if (TryEnforceCurrentTodoTool(currentTodo, toolName, out var currentTodoNudge))
+                    {
+                        result = currentTodoNudge;
+                    }
+                    else if (!NativeToolRegistry.TryGetTool(toolName, out ITool? tool) || tool is null)
+                    {
+                        result = $"Unknown tool: {toolName}\nAvailable tools (this phase):\n{RenderToolsForPhase(phase)}";
+                    }
+                    else
+                    {
+                        var argumentsValid = true;
+                        try
                         {
-                            phase = phase.ToString(),
-                            step = phaseStep,
-                            tool = toolName
-                        });
-                        continue;
+                            input = ToolSchemaRegistry.ConvertArguments(tool, toolCall.ArgumentsJson);
+                        }
+                        catch (Exception ex)
+                        {
+                            argumentsValid = false;
+                            result = $"Invalid tool arguments for {toolName}: {ex.Message}";
+                        }
+
+                        if (!argumentsValid)
+                        {
+                        }
+                        else if (toolName is "apply_diff" or "apply_patch" && IsJsonObjectInput(input))
+                        {
+                            result = "apply_diff/apply_patch input must be a raw V4A patch string starting with '*** Begin Patch', not a JSON object.";
+                        }
+                        else
+                        {
+                            _events.Add(AgentEventType.ToolCall, $"Tool call: {toolName}", input, toolName, input);
+                            await _logger.LogAsync("tool_call", new
+                            {
+                                phase = phase.ToString(),
+                                step = phaseStep,
+                                tool = toolName,
+                                input,
+                                mode = "native_tools"
+                            });
+
+                            executedTool = true;
+                            var normalizedInput = NormalizeToolInput(toolName, input);
+                            result = TryBlockRepeatedDiscoveryToolCall(toolName, normalizedInput, successfulDiscoveryCalls, out var repeatedDiscoveryFailure)
+                                ? Record(tool, input, repeatedDiscoveryFailure, true)
+                                : TryBlockRepeatedFailedToolCall(toolName, normalizedInput, failedToolCalls, out var repeatedFailure)
+                                ? Record(tool, input, repeatedFailure, true)
+                                : TryBlockWrongDocumentationWrite(toolName, input, _state.CurrentTaskKind, out var wrongDocsWriteFailure)
+                                    ? Record(tool, input, wrongDocsWriteFailure, true)
+                                : TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
+                                    ? Record(tool, input, groundingFailure, true)
+                                    : await ExecuteToolAsync(tool, input);
+
+                            repeatedBlockedToolCalls = result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                                || result.StartsWith("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                                ? repeatedBlockedToolCalls + 1
+                                : 0;
+                            if (repeatedBlockedToolCalls >= 3)
+                            {
+                                var canAdvancePhase = phase switch
+                                {
+                                    AgentPhase.Discovery => hasGroundingEvidence,
+                                    AgentPhase.Editing => phaseHadSuccessfulMutation,
+                                    AgentPhase.Triage => throw new NotImplementedException(),
+                                    AgentPhase.Planning => throw new NotImplementedException(),
+                                    AgentPhase.Verification => throw new NotImplementedException(),
+                                    AgentPhase.Answering => throw new NotImplementedException(),
+                                    _ => true
+                                };
+                                if (canAdvancePhase && !isLastPhase)
+                                {
+                                    await _logger.LogAsync("phase_force_advance", new
+                                    {
+                                        phase = phase.ToString(),
+                                        step = phaseStep,
+                                        reason = "repeated_blocked_tool_calls",
+                                        tool = toolName,
+                                        mode = "native_tools"
+                                    });
+                                    phaseDone = true;
+                                }
+
+                                if (phaseDone)
+                                {
+                                    break;
+                                }
+
+                                var blocker = $"Blocked: the agent is repeatedly retrying {toolName} with the same input after explicit loop-prevention errors.";
+                                _events.Add(AgentEventType.Final, "Final", blocker);
+                                await _logger.LogAsync("final", new
+                                {
+                                    text = blocker,
+                                    mode = "native_tools"
+                                });
+                                Console.WriteLine(blocker);
+                                return;
+                            }
+
+                            if (IsGroundingEvidence(toolName, result))
+                            {
+                                hasGroundingEvidence = true;
+                                _state.GroundingEvidenceBytes += result.Length;
+                            }
+
+                            TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
+                            if (_state.LastTool is { IsError: false })
+                            {
+                                if (MutationToolNames.Contains(toolName))
+                                {
+                                    reportMutation(true);
+                                    phaseHadSuccessfulMutation = true;
+                                    foreach (var path in ExtractMutationPaths(toolName, input, result))
+                                    {
+                                        var entry = $"{toolName} -> {path}";
+                                        if (!mutationLog.Contains(entry, StringComparer.Ordinal))
+                                        {
+                                            mutationLog.Add(entry);
+                                        }
+                                    }
+                                }
+
+                                if (isLastPhase && await TryCompleteRunAsync(task, toolName, input, result))
+                                {
+                                    return;
+                                }
+                            }
+
+                            if (toolName == "run_command")
+                            {
+                                analysis = await _analyzer.AnalyzeAsync(result);
+                                await _logger.LogAsync("command_analysis", new
+                                {
+                                    phase = phase.ToString(),
+                                    step = phaseStep,
+                                    analysis,
+                                    mode = "native_tools"
+                                });
+                                if (!result.Contains("\"ExitCode\": 0"))
+                                {
+                                    failedRuns++;
+                                    if (failedRuns >= _config.MaxFailedCommandAttempts)
+                                    {
+                                        messages.Add(new LlmChatMessage("user", "Maximum failed command attempts reached. Return the blocker or choose a different recovery tool."));
+                                    }
+                                }
+                                else
+                                {
+                                    failedRuns = 0;
+                                }
+                            }
+                        }
                     }
 
-                    if (TryEnforceCurrentTodoTool(currentTodo, toolName, out var currentTodoNudge))
-                    {
-                        transcript += $"\n{currentTodoNudge}";
-                        await _logger.LogAsync("error", new
-                        {
-                            phase = phase.ToString(),
-                            step = phaseStep,
-                            kind = "current_todo_tool",
-                            currentTodo,
-                            got = toolName
-                        });
-                        continue;
-                    }
-
-                    if (!_tools.TryGetValue(toolName, out ITool? tool))
-                    {
-                        transcript += $"\nUnknown tool: {toolName}\nAvailable tools (this phase):\n{RenderToolsForPhase(phase)}";
-                        await _logger.LogAsync("error", new
-                        {
-                            phase = phase.ToString(),
-                            step = phaseStep,
-                            kind = "unknown_tool",
-                            tool = toolName
-                        });
-                        continue;
-                    }
-                    if (toolName is "apply_diff" or "apply_patch" && IsJsonObjectInput(input))
-                    {
-                        transcript += "\napply_diff/apply_patch input must be a raw V4A patch string starting with '*** Begin Patch', not a JSON object. Example:\n*** Begin Patch\n*** Update File: path/file.cs\n@@\n- old line\n+ new line\n*** End Patch\nRead the file first to copy the exact '-' line text, then retry.";
-                        await _logger.LogAsync("error", new
-                        {
-                            phase = phase.ToString(),
-                            step = phaseStep,
-                            kind = "diff_input_shape",
-                            tool = toolName
-                        });
-                        continue;
-                    }
-                    _events.Add(AgentEventType.ToolCall, $"Tool call: {toolName}", input, toolName, input);
-                    await _logger.LogAsync("tool_call", new
-                    {
-                        phase = phase.ToString(),
-                        step = phaseStep,
-                        tool = toolName,
-                        input
-                    });
-                    var normalizedInput = NormalizeToolInput(toolName, input);
-                    var result = TryBlockRepeatedDiscoveryToolCall(toolName, normalizedInput, successfulDiscoveryCalls, out var repeatedDiscoveryFailure)
-                        ? Record(tool, input, repeatedDiscoveryFailure, true)
-                        : TryBlockRepeatedFailedToolCall(toolName, normalizedInput, failedToolCalls, out var repeatedFailure)
-                        ? Record(tool, input, repeatedFailure, true)
-                        : TryBlockWrongDocumentationWrite(toolName, input, _state.CurrentTaskKind, out var wrongDocsWriteFailure)
-                            ? Record(tool, input, wrongDocsWriteFailure, true)
-                        : TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
-                            ? Record(tool, input, groundingFailure, true)
-                            : await ExecuteToolAsync(tool, input);
-                    _events.Add(AgentEventType.ToolResult, $"Tool result: {toolName}", result, toolName, input);
                     var trimmedResult = await TrimToolResultAsync(result);
+                    _events.Add(AgentEventType.ToolResult, $"Tool result: {toolName}", result, toolName, string.IsNullOrWhiteSpace(input) ? null : input);
                     await _logger.LogAsync("tool_result", new
                     {
                         phase = phase.ToString(),
                         step = phaseStep,
                         tool = toolName,
-                        result = trimmedResult
+                        result = trimmedResult,
+                        mode = "native_tools",
+                        executedTool
                     });
-                    repeatedBlockedToolCalls = result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
-                        || result.StartsWith("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)
-                        ? repeatedBlockedToolCalls + 1
-                        : 0;
-                    if (repeatedBlockedToolCalls >= 3)
+                    transcript += string.IsNullOrWhiteSpace(input)
+                        ? $"\n\nAssistant tool call:\n{toolName}\n\nTool result:\n{trimmedResult}\n"
+                        : $"\n\nAssistant tool call:\n{{\"tool\":\"{toolName}\",\"input\":{JsonSerializer.Serialize(input)}}}\n\nTool result:\n{trimmedResult}\n"
+                            + (analysis is null ? "" : $"\nCommand analysis:\n{analysis}\n")
+                            + (BuildRecoveryGuidance(toolName, result) is { } recovery ? $"\nRecovery guidance:\n{recovery}\n" : "");
+                    messages.Add(new LlmChatMessage("tool", trimmedResult, ToolName: toolName));
+                    if (phaseDone)
                     {
-                        var canAdvancePhase = phase switch
-                        {
-                            AgentPhase.Discovery => hasGroundingEvidence,
-                            AgentPhase.Editing => phaseHadSuccessfulMutation,
-                            AgentPhase.Triage => throw new NotImplementedException(),
-                            AgentPhase.Planning => throw new NotImplementedException(),
-                            AgentPhase.Verification => throw new NotImplementedException(),
-                            AgentPhase.Answering => throw new NotImplementedException(),
-                            _ => true
-                        };
-                        if (canAdvancePhase && !isLastPhase)
-                        {
-                            await _logger.LogAsync("phase_force_advance", new
-                            {
-                                phase = phase.ToString(),
-                                step = phaseStep,
-                                reason = "repeated_blocked_tool_calls",
-                                tool = toolName
-                            });
-                            transcript += $"\nPhase {phase} force-advanced after repeated blocked {toolName} calls; existing evidence is sufficient to continue.";
-                            phaseDone = true;
-                            break;
-                        }
+                        break;
+                    }
+                }
 
-                        var blocker = $"Blocked: the agent is repeatedly retrying {toolName} with the same input after explicit loop-prevention errors. It must switch to a different tool or query instead of continuing this run.";
-                        _events.Add(AgentEventType.Final, "Final", blocker);
-                        await _logger.LogAsync("final", new
-                        {
-                            text = blocker
-                        });
-                        Console.WriteLine(blocker);
-                        return;
-                    }
-                    if (IsGroundingEvidence(toolName, result))
-                    {
-                        hasGroundingEvidence = true;
-                        _state.GroundingEvidenceBytes += result.Length;
-                    }
-                    TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
-                    if (_state.LastTool is { IsError: false })
-                    {
-                        if (MutationToolNames.Contains(toolName))
-                        {
-                            reportMutation(true);
-                            phaseHadSuccessfulMutation = true;
-                            foreach (var p in ExtractMutationPaths(toolName, input, result))
-                            {
-                                var entry = $"{toolName} -> {p}";
-                                if (!mutationLog.Contains(entry, StringComparer.Ordinal))
-                                {
-                                    mutationLog.Add(entry);
-                                }
-                            }
-                        }
-                        // todos advance at phase boundary, not per tool call.
-                        if (isLastPhase && await TryCompleteRunAsync(task, toolName, input, result))
-                        {
-                            return;
-                        }
-                    }
-                    var recoveryGuidance = BuildRecoveryGuidance(toolName, result);
-                    string? analysis = null;
-                    if (toolName == "run_command")
-                    {
-                        analysis = await _analyzer.AnalyzeAsync(result);
-                        await _logger.LogAsync("command_analysis", new
-                        {
-                            phase = phase.ToString(),
-                            step = phaseStep,
-                            analysis
-                        });
-                        if (!result.Contains("\"ExitCode\": 0"))
-                        {
-                            failedRuns++;
-                            if (failedRuns >= _config.MaxFailedCommandAttempts)
-                            {
-                                transcript += "\nMaximum failed command attempts reached. Explain what is blocking progress and return final.";
-                            }
-                        }
-                        else
-                        {
-                            failedRuns = 0;
-                        }
-                    }
-                    transcript += $"\n\nAssistant tool call:\n{cleaned}\n\nTool result:\n{trimmedResult}\n"
-                        + (analysis is null ? "" : $"\nCommand analysis:\n{analysis}\n")
-                        + (recoveryGuidance is null ? "" : $"\nRecovery guidance:\n{recoveryGuidance}\n");
+                if (phaseDone)
+                {
+                    break;
                 }
             }
 
@@ -416,17 +414,19 @@ public sealed partial class AgentLoop
             {
                 phase = phase.ToString(),
                 phaseDone,
-                globalStep
+                globalStep,
+                mode = "native_tools"
             });
             await AdvancePhaseTodoAsync(phase);
             if (phase is AgentPhase.Editing && !phaseHadSuccessfulMutation)
             {
-                var blocker = "Blocked: Editing phase ended without applying any file changes. The agent must call apply_diff (or another mutation tool) successfully before advancing. Re-run the task or refine the prompt.";
+                var blocker = "Blocked: Editing phase ended without applying any file changes. The agent must call a mutation tool successfully before advancing.";
                 _events.Add(AgentEventType.Final, "Final", blocker);
                 await _logger.LogAsync("final", new
                 {
                     text = blocker,
-                    reason = "editing_no_mutation"
+                    reason = "editing_no_mutation",
+                    mode = "native_tools"
                 });
                 Console.WriteLine(blocker);
                 return;
@@ -437,6 +437,27 @@ public sealed partial class AgentLoop
             }
         }
         await SynthesizeFinalAsync(task, triage, transcript, mutationLog);
+    }
+
+    private async Task<string> BuildNativePhasePromptAsync(string task, TriageResult triage, AgentPhase phase, string priorTranscript, string currentTodo, string completedTodos)
+    {
+        var recentState = string.IsNullOrWhiteSpace(priorTranscript)
+            ? (string.IsNullOrWhiteSpace(_session.ReadSummary()) ? "(none)" : await TrimRecentStateAsync(_session.ReadSummary()))
+            : await TrimRecentStateAsync(priorTranscript);
+        var thinkingHint = _config.EnableThinking && LlmClient.IsThinkingModel(_config.ModelName)
+            ? "\nPreserve useful reasoning across tool calls and use it to decide the next action.\n"
+            : "";
+        return _prompts.Render(PromptId.PhaseAgentNative, new()
+        {
+            ["phase"] = phase.ToString(),
+            ["phase_hint"] = PhaseToolPolicy.PhaseHint(phase) + thinkingHint,
+            ["task"] = task,
+            ["goal"] = triage.Goal,
+            ["current_todo"] = currentTodo,
+            ["completed_todos"] = completedTodos,
+            ["tools"] = RenderToolsForPhase(phase),
+            ["recent_state"] = recentState
+        });
     }
 
     private async Task SeedPhaseTodosAsync(PhasePlan plan)
@@ -726,22 +747,6 @@ public sealed partial class AgentLoop
         return trimmed.Length > 0 && trimmed[0] == '{';
     }
 
-    private static string ReadJsonValue(JsonElement value)
-    {
-        return value.ValueKind switch
-        {
-            JsonValueKind.Undefined => "",
-            JsonValueKind.Object => value.GetRawText(),
-            JsonValueKind.Array => value.GetRawText(),
-            JsonValueKind.String => value.GetString() ?? "",
-            JsonValueKind.Number => value.GetRawText(),
-            JsonValueKind.True => value.GetRawText(),
-            JsonValueKind.False => value.GetRawText(),
-            JsonValueKind.Null => "",
-            _ => value.GetRawText()
-        };
-    }
-
     private static bool ShouldRejectPrematureFinal(string text, int step)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -771,35 +776,7 @@ public sealed partial class AgentLoop
 
         return prematurePhrases.Any(phrase => normalized.Contains(phrase, StringComparison.OrdinalIgnoreCase));
     }
-
-    private static bool LooksLikeDraftContent(string response)
-    {
-        if (string.IsNullOrWhiteSpace(response))
-        {
-            return false;
-        }
-
-        string[] markers =
-        [
-            "```mermaid",
-            "graph td",
-            "graph lr",
-            "flowchart ",
-            "sequencediagram",
-            "classdiagram",
-            "statediagram",
-            "erdiagram",
-            "gantt",
-            "mindmap",
-            "quadrantchart",
-            "# architecture",
-            "## architecture"
-        ];
-
-        return markers.Any(marker => response.Contains(marker, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private async Task<string> CompactTranscriptIfNeededAsync(string task, string transcript, AgentPhase phase)
+    private async Task<string> CompactTranscriptIfNeededAsync(string transcript, AgentPhase phase)
     {
         var maxPromptTokens = Math.Max(1, _config.ContextWindowTokens - _config.ContextWindowReserveTokens);
         var promptTokens = await _llm.CountPromptTokensAsync(transcript);
@@ -819,7 +796,7 @@ public sealed partial class AgentLoop
             contextWindowReserveTokens = _config.ContextWindowReserveTokens,
             summary
         });
-        return BuildCompactedPrompt(task, summary, phase);
+        return "Compacted summary:\n" + summary;
     }
 
     private async Task<string> ExecuteToolAsync(ITool tool, string input)
@@ -1164,39 +1141,6 @@ public sealed partial class AgentLoop
             || normalized.EndsWith(".mdx", StringComparison.OrdinalIgnoreCase)
             || normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
     }
-
-    private async Task<string> BuildPhasePromptAsync(string task, TriageResult triage, AgentPhase phase, string priorTranscript)
-    {
-        var recentState = string.IsNullOrWhiteSpace(priorTranscript)
-            ? (string.IsNullOrWhiteSpace(_session.ReadSummary()) ? "(none)" : await TrimRecentStateAsync(_session.ReadSummary()))
-            : await TrimRecentStateAsync(priorTranscript);
-        var thinkingHint = _config.EnableThinking && LlmClient.IsThinkingModel(_config.ModelName)
-            ? "\nUse step-by-step thinking (<think>...</think>) before emitting the JSON. The <think> block will be stripped before parsing.\n"
-            : "";
-        return _prompts.Render(PromptId.PhaseAgent, new()
-        {
-            ["phase"] = phase.ToString(),
-            ["phase_hint"] = PhaseToolPolicy.PhaseHint(phase) + thinkingHint,
-            ["task"] = task,
-            ["goal"] = triage.Goal,
-            ["current_todo"] = "(seed)",
-            ["completed_todos"] = "(none)",
-            ["tools"] = RenderToolsForPhase(phase),
-            ["recent_state"] = recentState
-        });
-    }
-
-    private string BuildCompactedPrompt(string task, string summary, AgentPhase phase) => _prompts.Render(PromptId.PhaseAgent, new()
-    {
-        ["phase"] = phase.ToString(),
-        ["phase_hint"] = PhaseToolPolicy.PhaseHint(phase),
-        ["task"] = task,
-        ["goal"] = _state.CurrentPhasePlan?.Goal ?? "",
-        ["current_todo"] = "(see summary)",
-        ["completed_todos"] = "(see summary)",
-        ["tools"] = RenderToolsForPhase(phase),
-        ["recent_state"] = "Compacted summary:\n" + summary
-    });
 
     private string RenderToolsForPhase(AgentPhase phase) =>
         string.Join("\n", PhaseToolPolicy.Filter(_tools.Values, phase).Select(t => $"- {t.Name}: {ShortDescription(t.Description)}"));

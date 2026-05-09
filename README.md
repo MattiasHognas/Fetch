@@ -8,7 +8,7 @@ A local terminal/TUI coding-agent harness for Ollama/Qwen-style local LLMs.
 - Ollama running locally
 - `rg` / ripgrep recommended
 - Optional embedding model: `ollama pull nomic-embed-text`
-- Optional LSP servers: `gopls`, `rust-analyzer`, `typescript-language-server`, etc.
+- Optional LSP servers: `gopls`, `rust-analyzer`, `typescript-language-server`, `csharp-ls`, etc.
 
 ### Install Ollama
 ```bash
@@ -37,7 +37,7 @@ curl http://localhost:11434/api/chat -d '{
   }
 }'
 ```
-For native tool calling, pass a `tools` array to `/api/chat` and consume `message.tool_calls` plus `message.thinking` from the response.
+Tool calling is required. Pass a `tools` array to `/api/chat` and consume `message.tool_calls` plus `message.thinking` from the response.
 
 Ollama tag names do not always match upstream Qwen naming exactly; check the installed Ollama tags before changing `ModelName`.
 
@@ -67,7 +67,7 @@ dotnet run -- chat
 dotnet run -- agent "fix failing tests"
 ```
 
-The default config now targets chat completions with Qwen, native tool calling, reasoning preservation, and a 100k context window. Prompt-facing budgets now expose token settings for recent state and tool results, while the older char limits remain as compatibility caps. Keep the larger tool/context limits if you want the agent to benefit from that wider context.
+The agent now requires chat-based native tool calling with Qwen, reasoning preservation, and a 100k context window. Prompt-facing budgets expose token settings for recent state and tool results, while the older char limits remain as compatibility caps. Keep the larger tool/context limits if you want the agent to benefit from that wider context.
 
 Useful slash commands in chat mode:
 

@@ -14,10 +14,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
     [GeneratedRegex(@"<think>([\s\S]*?)</think>", RegexOptions.IgnoreCase)]
     private static partial Regex ThinkBlockRegex();
 
-    public bool UsesChatCompletions => string.Equals(_config.ModelTransport, "chat", StringComparison.OrdinalIgnoreCase);
-    public bool SupportsNativeToolCalling => UsesChatCompletions && _config.EnableNativeToolCalls;
-
-    public async Task<string> ChatAsync(string prompt, bool stream = false) => (await CompletePromptAsync(prompt, stream)).Content;
+    public async Task<string> ChatAsync(string prompt, bool stream = false) => (stream ? await ChatPromptStreamingAsync(prompt) : await ChatPromptNonStreamingAsync(prompt)).Content;
 
     /// <summary>Removes &lt;think&gt;...&lt;/think&gt; reasoning blocks emitted by qwen3/deepseek-r1/gpt-oss before JSON parsing.</summary>
     public static string StripThinking(string response) =>
@@ -36,11 +33,6 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
             || n.Contains(":qwen3", StringComparison.Ordinal)
             || n.Contains(":deepseek-r1", StringComparison.Ordinal);
     }
-
-    public async Task<LlmPromptResponse> CompletePromptAsync(string prompt, bool stream = false) =>
-        UsesChatCompletions
-            ? stream ? await ChatPromptStreamingAsync(prompt) : await ChatPromptNonStreamingAsync(prompt)
-            : stream ? await GeneratePromptStreamingAsync(prompt) : await GeneratePromptNonStreamingAsync(prompt);
 
     public async Task<LlmChatResponse> ChatWithToolsAsync(IReadOnlyList<LlmChatMessage> messages, IEnumerable<NativeToolDefinition> tools)
     {
@@ -88,22 +80,6 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
             options["preserve_thinking"] = _config.ProviderPreserveThinking.Value;
         }
         return options;
-    }
-
-    private Dictionary<string, object?> BuildGenerateRequest(string prompt, bool stream)
-    {
-        var payload = new Dictionary<string, object?>
-        {
-            ["model"] = _config.ModelName,
-            ["prompt"] = prompt,
-            ["stream"] = stream,
-            ["options"] = BuildOptions()
-        };
-        if (ShouldSendThink)
-        {
-            payload["think"] = true;
-        }
-        return payload;
     }
 
     private Dictionary<string, object?> BuildChatRequest(IReadOnlyList<LlmChatMessage> messages, bool stream, IEnumerable<NativeToolDefinition>? tools = null)
@@ -195,48 +171,6 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
     }
 
     private static int EstimatePromptTokens(string prompt) => Math.Max(1, (prompt.Length + 3) / 4);
-
-    private async Task<LlmPromptResponse> GeneratePromptNonStreamingAsync(string prompt)
-    {
-        HttpResponseMessage response = await _http.PostAsJsonAsync($"{_config.ModelBaseUrl.TrimEnd('/')}/api/generate", BuildGenerateRequest(prompt, false));
-        _ = response.EnsureSuccessStatusCode();
-        using JsonDocument json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
-        var raw = json.RootElement.TryGetProperty("response", out JsonElement r) ? r.GetString() ?? "" : json.RootElement.ToString();
-        return ParseGenerateResponse(raw);
-    }
-
-    private async Task<LlmPromptResponse> GeneratePromptStreamingAsync(string prompt)
-    {
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"{_config.ModelBaseUrl.TrimEnd('/')}/api/generate");
-        request.Content = JsonContent.Create(BuildGenerateRequest(prompt, true));
-        using HttpResponseMessage response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-        _ = response.EnsureSuccessStatusCode();
-        await using Stream stream = await response.Content.ReadAsStreamAsync();
-        using var reader = new StreamReader(stream);
-        var sb = new StringBuilder();
-        string? line;
-        while ((line = await reader.ReadLineAsync()) != null)
-        {
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                continue;
-            }
-
-            using var doc = JsonDocument.Parse(line);
-            if (doc.RootElement.TryGetProperty("response", out JsonElement r))
-            {
-                var token = r.GetString() ?? "";
-                Console.Write(token);
-                _ = sb.Append(token);
-            }
-            if (doc.RootElement.TryGetProperty("done", out JsonElement d) && d.GetBoolean())
-            {
-                break;
-            }
-        }
-        Console.WriteLine();
-        return ParseGenerateResponse(sb.ToString());
-    }
 
     private async Task<LlmPromptResponse> ChatPromptNonStreamingAsync(string prompt)
     {

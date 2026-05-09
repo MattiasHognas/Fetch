@@ -60,7 +60,7 @@ You are operating inside Fetch, a local .NET coding-agent harness with TUI, chat
 - `Core/AgentPhase.cs` defines the phase enum and `PhasePlan` record.
 - `Core/PhaseToolPolicy.cs` hard-gates which tools the LLM may call in each phase.
 - `Planning/Triage.cs` runs the LLM triage call that picks the task kind and ordered phases (Discovery, Planning, Editing, Verification, Answering).
-- `Planning/Planning.cs` hosts `ToolRouter`, `CommandResultAnalyzer`, and `TranscriptCompactor`.
+- `Planning/Planning.cs` hosts `CommandResultAnalyzer` and `TranscriptCompactor`.
 - `Prompts/PromptCatalog.cs` defines the base triage/phase/router prompt rules.
 - `Approval/ApprovalPolicy.cs` and `Config/AgentConfig.cs` define approval and safety behavior.
 - `Tools/` contains the concrete tool semantics.
