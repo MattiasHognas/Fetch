@@ -6,6 +6,7 @@ namespace Fetch.Core;
 public sealed partial class AgentLoop
 {
     private readonly LlmClient _llm; private readonly Dictionary<string, ITool> _tools; private readonly SessionLogger _logger; private readonly TodoStore _todoStore; private readonly AgentConfig _config; private readonly PromptCatalog _prompts; private readonly AgentSession _session; private readonly AgentRuntimeState _state; private readonly AgentEventStore _events; private readonly SemanticIndex _semanticIndex; private readonly TriageRunner _triage; private readonly CommandResultAnalyzer _analyzer; private readonly TranscriptCompactor _compactor; private readonly ApprovalPolicy _approvalPolicy; private readonly string? _agentMd;
+    private const int MinDocumentationEvidenceBytes = 2048;
     private static readonly HashSet<string> MutationToolNames = new(StringComparer.Ordinal) { "apply_diff", "apply_patch", "create_file", "delete_file", "rename_file" };
     private static int _reindexInFlight;
 
@@ -190,6 +191,21 @@ public sealed partial class AgentLoop
                 });
 
                 messages.Add(new LlmChatMessage("assistant", response.Content, response.Reasoning, ToolCalls: response.ToolCalls));
+
+                if (ShouldForceDiscoveryAdvance(phase, _state.CurrentTaskKind, response, _state.GroundingEvidenceBytes))
+                {
+                    const string autoAdvanceMessage = "Discovery gathered enough evidence and the model signaled readiness to write. Advancing to the Editing phase.";
+                    _events.Add(AgentEventType.LlmResponse, "Phase auto-advance", autoAdvanceMessage);
+                    await _logger.LogAsync("phase_force_advance", new
+                    {
+                        phase = phase.ToString(),
+                        step = phaseStep,
+                        reason = "discovery_ready_to_write",
+                        mode = "native_tools"
+                    });
+                    phaseDone = true;
+                    break;
+                }
 
                 if (response.ToolCalls.Count == 0)
                 {
@@ -434,6 +450,20 @@ public sealed partial class AgentLoop
                 {
                     break;
                 }
+            }
+
+            if (ShouldAdvanceGroundedDocumentationDiscoveryAfterBudget(phase, isLastPhase, phaseDone, _state.CurrentTaskKind, _state.GroundingEvidenceBytes, globalStep))
+            {
+                const string budgetAdvanceMessage = "Discovery hit its step budget after gathering enough documentation evidence. Advancing to the Editing phase.";
+                _events.Add(AgentEventType.LlmResponse, "Phase auto-advance", budgetAdvanceMessage);
+                await _logger.LogAsync("phase_force_advance", new
+                {
+                    phase = phase.ToString(),
+                    step = globalStep,
+                    reason = "discovery_budget_with_grounding",
+                    mode = "native_tools"
+                });
+                phaseDone = true;
             }
 
             await _logger.LogAsync("phase_exit", new
@@ -1030,13 +1060,12 @@ public sealed partial class AgentLoop
         {
             return false;
         }
-        const int minEvidenceBytes = 2048;
-        if (hasGroundingEvidence && _state.GroundingEvidenceBytes >= minEvidenceBytes)
+        if (hasGroundingEvidence && _state.GroundingEvidenceBytes >= MinDocumentationEvidenceBytes)
         {
             return false;
         }
         failure = "Grounding required before writing documentation. Call code_map and at least one read tool (read_ranges, read_file, context_pack) on real repo files first; accumulated evidence must be at least "
-            + minEvidenceBytes
+            + MinDocumentationEvidenceBytes
             + " bytes. Do not retry the write yet.";
         return true;
     }
@@ -1277,6 +1306,56 @@ public sealed partial class AgentLoop
             || normalized.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
             || normalized.EndsWith(".mdx", StringComparison.OrdinalIgnoreCase)
             || normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldForceDiscoveryAdvance(AgentPhase phase, TaskKind taskKind, LlmChatResponse response, int groundingEvidenceBytes)
+    {
+        return phase == AgentPhase.Discovery
+            && taskKind is TaskKind.ArchitectureDocs or TaskKind.Documentation
+            && groundingEvidenceBytes >= MinDocumentationEvidenceBytes
+            && response.ToolCalls.Count != 0
+            && !response.ToolCalls.Any(t => !IsDiscoveryTool(t.Name)) && SignalsReadyToWriteDocumentation(response.Content, response.Reasoning);
+    }
+
+    private bool ShouldAdvanceGroundedDocumentationDiscoveryAfterBudget(AgentPhase phase, bool isLastPhase, bool phaseDone, TaskKind taskKind, int groundingEvidenceBytes, int globalStep)
+    {
+        return phase == AgentPhase.Discovery
+            && !isLastPhase
+            && !phaseDone
+            && taskKind is TaskKind.ArchitectureDocs or TaskKind.Documentation
+            && groundingEvidenceBytes >= MinDocumentationEvidenceBytes
+            && globalStep < _config.MaxAgentSteps;
+    }
+
+    private static bool SignalsReadyToWriteDocumentation(string? content, string? reasoning)
+    {
+        var text = string.Join("\n", [content ?? "", reasoning ?? ""]);
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        string[] evidenceSignals =
+        [
+            "have all the evidence i need",
+            "have enough information",
+            "all the information i need",
+            "ready to create",
+            "ready to write"
+        ];
+        string[] writeSignals =
+        [
+            "let me create",
+            "let me now create",
+            "let me write",
+            "create the architecture.md file",
+            "write the architecture.md file",
+            "create the docs",
+            "write the docs"
+        ];
+
+        return evidenceSignals.Any(signal => text.Contains(signal, StringComparison.OrdinalIgnoreCase))
+            && writeSignals.Any(signal => text.Contains(signal, StringComparison.OrdinalIgnoreCase));
     }
 
     private string RenderToolsForPhase(AgentPhase phase) =>
