@@ -8,9 +8,20 @@ namespace Fetch.Core;
 
 public sealed partial class LlmClient(AgentConfig config) : IDisposable
 {
-    private readonly HttpClient _http = new();
+    private readonly HttpClient _http = CreateHttpClient(config);
     private readonly AgentConfig _config = config;
     private bool? _supportsTokenizeEndpoint;
+
+    private static HttpClient CreateHttpClient(AgentConfig config)
+    {
+        var http = new HttpClient
+        {
+            Timeout = config.ModelRequestTimeoutSeconds <= 0
+                ? Timeout.InfiniteTimeSpan
+                : TimeSpan.FromSeconds(config.ModelRequestTimeoutSeconds)
+        };
+        return http;
+    }
 
     public Action<string>? PromptReasoningSink
     {
@@ -44,7 +55,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
     {
         var endpoint = $"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat";
 
-        using HttpResponseMessage response = await _http.PostAsJsonAsync(endpoint, BuildChatRequest(messages, stream: false, tools));
+        using HttpResponseMessage response = await PostAsJsonAsync(endpoint, BuildChatRequest(messages, stream: false, tools));
         if (response.IsSuccessStatusCode)
         {
             return await ParseChatResponseAsync(response);
@@ -53,7 +64,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
         var initialFailure = await BuildHttpFailureMessageAsync(response, "/api/chat");
         if (response.StatusCode == HttpStatusCode.InternalServerError && CanRetryToolChatWithReducedState)
         {
-            using HttpResponseMessage retryResponse = await _http.PostAsJsonAsync(endpoint, BuildChatRequest(messages, stream: false, tools, sendThink: false, includeReasoning: false));
+            using HttpResponseMessage retryResponse = await PostAsJsonAsync(endpoint, BuildChatRequest(messages, stream: false, tools, sendThink: false, includeReasoning: false));
             if (retryResponse.IsSuccessStatusCode)
             {
                 LlmChatResponse parsed = await ParseChatResponseAsync(retryResponse);
@@ -180,7 +191,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
 
     private async Task<int> CountPromptTokensWithOllamaAsync(string prompt)
     {
-        using HttpResponseMessage response = await _http.PostAsJsonAsync($"{_config.ModelBaseUrl.TrimEnd('/')}/api/tokenize", new
+        using HttpResponseMessage response = await PostAsJsonAsync($"{_config.ModelBaseUrl.TrimEnd('/')}/api/tokenize", new
         {
             model = _config.ModelName,
             prompt
@@ -203,7 +214,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
 
     private async Task<LlmPromptResponse> ChatPromptNonStreamingAsync(string prompt)
     {
-        using HttpResponseMessage response = await _http.PostAsJsonAsync($"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat", BuildChatRequest([new LlmChatMessage("user", prompt)], stream: false));
+        using HttpResponseMessage response = await PostAsJsonAsync($"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat", BuildChatRequest([new LlmChatMessage("user", prompt)], stream: false));
         await EnsureSuccessOrThrowAsync(response, "/api/chat");
         LlmChatResponse parsed = await ParseChatResponseAsync(response);
         EmitPromptReasoning(parsed.Reasoning);
@@ -212,9 +223,10 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
 
     private async Task<LlmPromptResponse> ChatPromptStreamingAsync(string prompt)
     {
+        var endpoint = $"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat";
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat");
         request.Content = JsonContent.Create(BuildChatRequest([new LlmChatMessage("user", prompt)], stream: true));
-        using HttpResponseMessage response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        using HttpResponseMessage response = await SendAsync(request, endpoint, HttpCompletionOption.ResponseHeadersRead);
         await EnsureSuccessOrThrowAsync(response, "/api/chat");
         await using Stream stream = await response.Content.ReadAsStreamAsync();
         using var reader = new StreamReader(stream);
@@ -258,6 +270,23 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
         if (!string.IsNullOrWhiteSpace(reasoning))
         {
             PromptReasoningSink?.Invoke(reasoning);
+        }
+    }
+
+    private Task<HttpResponseMessage> PostAsJsonAsync(string endpoint, object payload) => SendAsync(() => _http.PostAsJsonAsync(endpoint, payload), endpoint);
+
+    private Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, string endpoint, HttpCompletionOption completionOption) => SendAsync(() => _http.SendAsync(request, completionOption), endpoint);
+
+    private async Task<HttpResponseMessage> SendAsync(Func<Task<HttpResponseMessage>> send, string endpoint)
+    {
+        try
+        {
+            return await send();
+        }
+        catch (TaskCanceledException ex) when (_http.Timeout != Timeout.InfiniteTimeSpan)
+        {
+            var timeoutSeconds = (int)Math.Ceiling(_http.Timeout.TotalSeconds);
+            throw new TimeoutException($"Model request to {endpoint} exceeded the configured timeout of {timeoutSeconds} seconds for model '{_config.ModelName}'. Increase ModelRequestTimeoutSeconds in .agent/config.json, or reduce thinking/preserved reasoning for slower models.", ex);
         }
     }
 
