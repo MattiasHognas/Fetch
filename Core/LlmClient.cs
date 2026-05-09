@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
@@ -10,6 +11,11 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
     private readonly HttpClient _http = new();
     private readonly AgentConfig _config = config;
     private bool? _supportsTokenizeEndpoint;
+
+    public Action<string>? PromptReasoningSink
+    {
+        get; set;
+    }
 
     [GeneratedRegex(@"<think>([\s\S]*?)</think>", RegexOptions.IgnoreCase)]
     private static partial Regex ThinkBlockRegex();
@@ -36,13 +42,36 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
 
     public async Task<LlmChatResponse> ChatWithToolsAsync(IReadOnlyList<LlmChatMessage> messages, IEnumerable<NativeToolDefinition> tools)
     {
-        using HttpResponseMessage response = await _http.PostAsJsonAsync($"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat", BuildChatRequest(messages, stream: false, tools));
-        _ = response.EnsureSuccessStatusCode();
-        using JsonDocument json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
-        return ParseChatResponse(json.RootElement);
+        var endpoint = $"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat";
+
+        using HttpResponseMessage response = await _http.PostAsJsonAsync(endpoint, BuildChatRequest(messages, stream: false, tools));
+        if (response.IsSuccessStatusCode)
+        {
+            return await ParseChatResponseAsync(response);
+        }
+
+        var initialFailure = await BuildHttpFailureMessageAsync(response, "/api/chat");
+        if (response.StatusCode == HttpStatusCode.InternalServerError && CanRetryToolChatWithReducedState)
+        {
+            using HttpResponseMessage retryResponse = await _http.PostAsJsonAsync(endpoint, BuildChatRequest(messages, stream: false, tools, sendThink: false, includeReasoning: false));
+            if (retryResponse.IsSuccessStatusCode)
+            {
+                LlmChatResponse parsed = await ParseChatResponseAsync(retryResponse);
+                return parsed with
+                {
+                    Warning = "Warning: the model retried once after a 500 from /api/chat without preserved reasoning/thinking. Output quality may be reduced."
+                };
+            }
+
+            var retryFailure = await BuildHttpFailureMessageAsync(retryResponse, "/api/chat retry without thinking");
+            throw new HttpRequestException($"{initialFailure}\nRetry without think/preserved reasoning also failed.\n{retryFailure}", null, retryResponse.StatusCode);
+        }
+
+        throw new HttpRequestException(initialFailure, null, response.StatusCode);
     }
 
     private bool ShouldSendThink => _config.EnableThinking && IsThinkingModel(_config.ModelName);
+    private bool CanRetryToolChatWithReducedState => ShouldSendThink || _config.PreserveReasoning;
 
     public async Task<int> CountPromptTokensAsync(string prompt)
     {
@@ -82,16 +111,16 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
         return options;
     }
 
-    private Dictionary<string, object?> BuildChatRequest(IReadOnlyList<LlmChatMessage> messages, bool stream, IEnumerable<NativeToolDefinition>? tools = null)
+    private Dictionary<string, object?> BuildChatRequest(IReadOnlyList<LlmChatMessage> messages, bool stream, IEnumerable<NativeToolDefinition>? tools = null, bool? sendThink = null, bool includeReasoning = true)
     {
         var payload = new Dictionary<string, object?>
         {
             ["model"] = _config.ModelName,
-            ["messages"] = messages.Select(ToChatMessagePayload).ToArray(),
+            ["messages"] = messages.Select(message => ToChatMessagePayload(message, includeReasoning)).ToArray(),
             ["stream"] = stream,
             ["options"] = BuildOptions()
         };
-        if (ShouldSendThink)
+        if (sendThink ?? ShouldSendThink)
         {
             payload["think"] = true;
         }
@@ -102,7 +131,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
         return payload;
     }
 
-    private object ToChatMessagePayload(LlmChatMessage message)
+    private Dictionary<string, object?> ToChatMessagePayload(LlmChatMessage message, bool includeReasoning)
     {
         var payload = new Dictionary<string, object?>
         {
@@ -112,7 +141,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
         {
             payload["content"] = message.Content;
         }
-        if (_config.PreserveReasoning && !string.IsNullOrWhiteSpace(message.Thinking))
+        if (includeReasoning && _config.PreserveReasoning && !string.IsNullOrWhiteSpace(message.Thinking))
         {
             payload["thinking"] = message.Thinking;
         }
@@ -175,9 +204,9 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
     private async Task<LlmPromptResponse> ChatPromptNonStreamingAsync(string prompt)
     {
         using HttpResponseMessage response = await _http.PostAsJsonAsync($"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat", BuildChatRequest([new LlmChatMessage("user", prompt)], stream: false));
-        _ = response.EnsureSuccessStatusCode();
-        using JsonDocument json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
-        LlmChatResponse parsed = ParseChatResponse(json.RootElement);
+        await EnsureSuccessOrThrowAsync(response, "/api/chat");
+        LlmChatResponse parsed = await ParseChatResponseAsync(response);
+        EmitPromptReasoning(parsed.Reasoning);
         return new LlmPromptResponse(parsed.Content, parsed.Reasoning);
     }
 
@@ -186,7 +215,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{_config.ModelBaseUrl.TrimEnd('/')}/api/chat");
         request.Content = JsonContent.Create(BuildChatRequest([new LlmChatMessage("user", prompt)], stream: true));
         using HttpResponseMessage response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
-        _ = response.EnsureSuccessStatusCode();
+        await EnsureSuccessOrThrowAsync(response, "/api/chat");
         await using Stream stream = await response.Content.ReadAsStreamAsync();
         using var reader = new StreamReader(stream);
         var content = new StringBuilder();
@@ -219,26 +248,55 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
             }
         }
         Console.WriteLine();
-        return new LlmPromptResponse(content.ToString().Trim(), reasoning.Length == 0 ? null : reasoning.ToString().Trim());
+        var parsedReasoning = reasoning.Length == 0 ? null : reasoning.ToString().Trim();
+        EmitPromptReasoning(parsedReasoning);
+        return new LlmPromptResponse(content.ToString().Trim(), parsedReasoning);
     }
 
-    private static LlmPromptResponse ParseGenerateResponse(string raw)
+    private void EmitPromptReasoning(string? reasoning)
     {
-        var thinking = ExtractThinking(raw);
-        return new LlmPromptResponse(StripThinking(raw), thinking);
-    }
-
-    private static string? ExtractThinking(string response)
-    {
-        if (string.IsNullOrWhiteSpace(response))
+        if (!string.IsNullOrWhiteSpace(reasoning))
         {
-            return null;
+            PromptReasoningSink?.Invoke(reasoning);
+        }
+    }
+
+    private static async Task<LlmChatResponse> ParseChatResponseAsync(HttpResponseMessage response)
+    {
+        using JsonDocument json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        return ParseChatResponse(json.RootElement);
+    }
+
+    private static async Task EnsureSuccessOrThrowAsync(HttpResponseMessage response, string endpoint)
+    {
+        if (response.IsSuccessStatusCode)
+        {
+            return;
         }
 
-        Match match = ThinkBlockRegex().Match(response);
-        return match.Success && match.Groups.Count > 1
-            ? match.Groups[1].Value.Trim()
-            : null;
+        var message = await BuildHttpFailureMessageAsync(response, endpoint);
+        throw new HttpRequestException(message, null, response.StatusCode);
+    }
+
+    private static async Task<string> BuildHttpFailureMessageAsync(HttpResponseMessage response, string endpoint)
+    {
+        var status = (int)response.StatusCode;
+        var reason = string.IsNullOrWhiteSpace(response.ReasonPhrase) ? response.StatusCode.ToString() : response.ReasonPhrase;
+        var body = response.Content is null ? "" : await response.Content.ReadAsStringAsync();
+        var detail = SummarizeResponseBody(body);
+        return $"Model request to {endpoint} failed with {status} ({reason}). Response body: {detail}";
+    }
+
+    private static string SummarizeResponseBody(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return "(empty body)";
+        }
+
+        var trimmed = body.Trim();
+        const int maxChars = 1200;
+        return trimmed.Length <= maxChars ? trimmed : trimmed[..maxChars] + "\n[truncated]";
     }
 
     private static LlmChatResponse ParseChatResponse(JsonElement root)

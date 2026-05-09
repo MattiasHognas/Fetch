@@ -147,6 +147,22 @@ public sealed partial class AgentLoop
             for (var phaseStep = 0; phaseStep < _config.MaxStepsPerPhase && globalStep < _config.MaxAgentSteps; phaseStep++, globalStep++)
             {
                 LlmChatResponse response = await _llm.ChatWithToolsAsync(messages, toolDefinitions);
+                if (!string.IsNullOrWhiteSpace(response.Warning))
+                {
+                    _events.Add(AgentEventType.LlmResponse, "Model retry", response.Warning);
+                    await _logger.LogAsync("llm_warning", new
+                    {
+                        phase = phase.ToString(),
+                        step = phaseStep,
+                        warning = response.Warning,
+                        mode = "native_tools"
+                    });
+                    if (_state.ApprovalPromptAsync is null)
+                    {
+                        Console.WriteLine(response.Warning);
+                    }
+                }
+
                 if (!string.IsNullOrWhiteSpace(response.Reasoning))
                 {
                     _events.Add(AgentEventType.Reasoning, $"Reasoning: {phase}", response.Reasoning);
@@ -156,6 +172,10 @@ public sealed partial class AgentLoop
                         step = phaseStep,
                         reasoning = response.Reasoning
                     });
+                    if (_state.ApprovalPromptAsync is null)
+                    {
+                        Console.WriteLine($"\n[Reasoning: {phase}]\n{response.Reasoning}");
+                    }
                 }
 
                 _events.Add(AgentEventType.LlmResponse, "LLM response", string.IsNullOrWhiteSpace(response.Content) ? "(tool call)" : response.Content);

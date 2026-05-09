@@ -40,4 +40,4 @@ public sealed record NativeToolDefinition(string Type, ToolFunctionDefinition Fu
 public sealed record LlmToolCall(string Name, string ArgumentsJson);
 public sealed record LlmChatMessage(string Role, string? Content = null, string? Thinking = null, string? ToolName = null, IReadOnlyList<LlmToolCall>? ToolCalls = null);
 public sealed record LlmPromptResponse(string Content, string? Reasoning = null);
-public sealed record LlmChatResponse(string Content, string? Reasoning, IReadOnlyList<LlmToolCall> ToolCalls);
+public sealed record LlmChatResponse(string Content, string? Reasoning, IReadOnlyList<LlmToolCall> ToolCalls, string? Warning = null);

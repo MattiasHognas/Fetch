@@ -29,6 +29,14 @@ static Runtime BuildRuntime(string? sessionId, bool newSession)
         SemanticSearchReady = semanticIndex.Exists
     };
     var events = new AgentEventStore();
+    llm.PromptReasoningSink = reasoning =>
+    {
+        events.Add(AgentEventType.Reasoning, "LLM reasoning", reasoning);
+        if (state.ApprovalPromptAsync is null)
+        {
+            Console.WriteLine($"\n[Reasoning]\n{reasoning}");
+        }
+    };
 
     ITool[] tools =
     [
