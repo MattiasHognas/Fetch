@@ -15,20 +15,20 @@ public static class PhaseToolPolicy
             "code_map", "repo_tree", "list_files", "search", "search_content",
             "symbol_search", "references_search", "semantic_search", "relationship_map",
             "read_ranges", "read_file", "context_pack", "get_file_summary", "refine_context",
-            "todo_read"
+            "todo_read", "phase_complete"
         },
         [AgentPhase.Planning] = new(StringComparer.Ordinal)
         {
-            "todo_write", "todo_read"
+            "todo_write", "todo_read", "phase_complete"
         },
         [AgentPhase.Editing] = new(StringComparer.Ordinal)
         {
             "apply_diff", "apply_patch", "create_file", "delete_file", "rename_file",
-            "read_file", "read_ranges", "todo_write", "todo_read"
+            "read_file", "read_ranges", "todo_write", "todo_read", "phase_complete"
         },
         [AgentPhase.Verification] = new(StringComparer.Ordinal)
         {
-            "run_command", "read_file", "read_ranges", "todo_write", "todo_read"
+            "run_command", "read_file", "read_ranges", "todo_write", "todo_read", "phase_complete"
         },
         [AgentPhase.Answering] = new(StringComparer.Ordinal)
         {
@@ -51,13 +51,13 @@ public static class PhaseToolPolicy
     public static string PhaseHint(AgentPhase phase) => phase switch
     {
         AgentPhase.Discovery =>
-            "Discovery phase: gather concrete repo evidence. Use code_map/read_ranges/search_content/symbol_search. Do NOT write files.",
+            "Discovery phase: gather concrete repo evidence. Use code_map/read_ranges/search_content/symbol_search. Do NOT write files. When discovery is complete, call phase_complete.",
         AgentPhase.Planning =>
-            "Planning phase: turn evidence into a concrete todo list with todo_write. Each todo should name the tool that will satisfy it, e.g. 'Read AgentLoop.cs (read_ranges)'. Then return phaseDone.",
+            "Planning phase: turn evidence into a concrete todo list with todo_write. Each todo should name the tool that will satisfy it, e.g. 'Read AgentLoop.cs (read_ranges)'. Then call phase_complete.",
         AgentPhase.Editing =>
             "Editing phase: apply focused patches (apply_diff/apply_patch) or create files. Read first, write second. Do NOT run commands or do new exploration here.\n" +
             "For architecture/documentation tasks, the first Editing-phase tool call must be apply_diff or create_file for the docs target. If that first write attempt fails, you may read the target file before retrying.\n" +
-            "You MUST attempt apply_diff (or another mutation tool) for the current todo before returning {\"phaseDone\":true}. phaseDone with no successful mutation will be rejected.\n" +
+            "You MUST attempt apply_diff (or another mutation tool) for the current todo before calling phase_complete. phase_complete with no successful mutation will be rejected.\n" +
             "apply_diff input MUST be a raw V4A patch string. Example:\n" +
             "*** Begin Patch\n" +
             "*** Update File: path/to/File.cs\n" +
@@ -68,7 +68,7 @@ public static class PhaseToolPolicy
             "Rules: include 1-3 unchanged context lines around each hunk; '-' lines must match the file byte-for-byte; do not wrap the patch in JSON, quotes, or markdown fences.",
 
         AgentPhase.Verification =>
-            "Verification phase: run the narrowest relevant build/test/inspection via run_command and verify the change. Do NOT edit files here.",
+            "Verification phase: run the narrowest relevant build/test/inspection via run_command and verify the change. Do NOT edit files here. When verification is complete and more phases remain, call phase_complete.",
         AgentPhase.Answering =>
             "Answering phase: synthesize a final answer that cites concrete file paths. Use read_ranges to confirm specifics. End with {\"final\":\"...\"}.",
         AgentPhase.Triage => throw new NotImplementedException(),

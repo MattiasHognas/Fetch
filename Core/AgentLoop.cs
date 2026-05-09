@@ -137,7 +137,7 @@ public sealed partial class AgentLoop
             var messages = new List<LlmChatMessage>
             {
                 new("system", await BuildNativePhasePromptAsync(task, triage, phase, transcript, currentTodo, completedTodos)),
-                new("user", $"Continue the {phase} phase for the current task. Use tools when needed. Reply with PHASE_DONE only when this phase is complete.")
+                new("user", $"Continue the {phase} phase for the current task. Use tools when needed. When this phase is complete, call the phase_complete tool instead of replying with PHASE_DONE text.")
             };
 
             var repeatedBlockedToolCalls = 0;
@@ -194,31 +194,15 @@ public sealed partial class AgentLoop
                 if (response.ToolCalls.Count == 0)
                 {
                     var content = response.Content.Trim();
-                    if (string.Equals(content, "PHASE_DONE", StringComparison.Ordinal))
+                    var canFinal = isLastPhase || phase is AgentPhase.Answering || phase is AgentPhase.Verification;
+                    if (content.Contains("PHASE_DONE", StringComparison.Ordinal))
                     {
-                        if (phase is AgentPhase.Discovery && !hasGroundingEvidence)
-                        {
-                            messages.Add(new LlmChatMessage("user", "PHASE_DONE rejected: gather grounding evidence with a read/search tool before advancing."));
-                            continue;
-                        }
-
-                        if (phase is AgentPhase.Editing && !phaseHadSuccessfulMutation)
-                        {
-                            messages.Add(new LlmChatMessage("user", "PHASE_DONE rejected: Editing requires at least one successful file mutation before advancing."));
-                            continue;
-                        }
-
-                        await _logger.LogAsync("phase_done_signal", new
-                        {
-                            phase = phase.ToString(),
-                            step = phaseStep,
-                            mode = "native_tools"
-                        });
-                        phaseDone = true;
-                        break;
+                        messages.Add(new LlmChatMessage("user", canFinal
+                            ? "PHASE_DONE text is not accepted. Call the phase_complete tool to advance this phase, or return the final user-facing answer if the task is complete."
+                            : "PHASE_DONE text is not accepted. If this phase is complete, call the phase_complete tool. Otherwise call another tool to keep working."));
+                        continue;
                     }
 
-                    var canFinal = isLastPhase || phase is AgentPhase.Answering || phase is AgentPhase.Verification;
                     if (canFinal && !ShouldRejectPrematureFinal(content, phaseStep))
                     {
                         _events.Add(AgentEventType.Final, "Final", content);
@@ -233,12 +217,13 @@ public sealed partial class AgentLoop
 
                     messages.Add(new LlmChatMessage("user", canFinal
                         ? "If the task is complete, return the final answer. Otherwise call a tool to continue working."
-                        : "If work remains in this phase, call a tool. Reply with PHASE_DONE only when the phase is actually complete."));
+                        : "If work remains in this phase, call a tool. When the phase is actually complete, call the phase_complete tool."));
                     continue;
                 }
 
-                foreach (LlmToolCall toolCall in response.ToolCalls)
+                for (var toolIndex = 0; toolIndex < response.ToolCalls.Count; toolIndex++)
                 {
+                    LlmToolCall toolCall = response.ToolCalls[toolIndex];
                     var toolName = toolCall.Name;
                     var input = "";
                     var result = "";
@@ -303,111 +288,119 @@ public sealed partial class AgentLoop
 
                                 executedTool = true;
                                 var normalizedInput = NormalizeToolInput(toolName, input);
-                                result = TryBlockRepeatedDiscoveryToolCall(toolName, normalizedInput, successfulDiscoveryCalls, out var repeatedDiscoveryFailure)
-                                    ? Record(tool, input, repeatedDiscoveryFailure, true)
-                                    : TryBlockRepeatedFailedToolCall(toolName, normalizedInput, failedToolCalls, out var repeatedFailure)
-                                    ? Record(tool, input, repeatedFailure, true)
-                                    : TryBlockWrongDocumentationWrite(toolName, input, _state.CurrentTaskKind, out var wrongDocsWriteFailure)
-                                        ? Record(tool, input, wrongDocsWriteFailure, true)
-                                    : TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
-                                        ? Record(tool, input, groundingFailure, true)
-                                        : await ExecuteToolAsync(tool, input);
-
-                                repeatedBlockedToolCalls = result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
-                                    || result.StartsWith("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)
-                                    ? repeatedBlockedToolCalls + 1
-                                    : 0;
-                                if (repeatedBlockedToolCalls >= 3)
+                                if (toolName == "phase_complete")
                                 {
-                                    var canAdvancePhase = phase switch
+                                    (result, phaseDone) = await ExecutePhaseCompleteToolAsync(tool, input, phase, phaseStep, hasGroundingEvidence, phaseHadSuccessfulMutation, toolIndex == response.ToolCalls.Count - 1);
+                                    TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
+                                }
+                                else
+                                {
+                                    result = TryBlockRepeatedDiscoveryToolCall(toolName, normalizedInput, successfulDiscoveryCalls, out var repeatedDiscoveryFailure)
+                                        ? Record(tool, input, repeatedDiscoveryFailure, true)
+                                        : TryBlockRepeatedFailedToolCall(toolName, normalizedInput, failedToolCalls, out var repeatedFailure)
+                                        ? Record(tool, input, repeatedFailure, true)
+                                        : TryBlockWrongDocumentationWrite(toolName, input, _state.CurrentTaskKind, out var wrongDocsWriteFailure)
+                                            ? Record(tool, input, wrongDocsWriteFailure, true)
+                                        : TryBlockUngroundedWrite(tool, input, hasGroundingEvidence, out var groundingFailure)
+                                            ? Record(tool, input, groundingFailure, true)
+                                            : await ExecuteToolAsync(tool, input);
+
+                                    repeatedBlockedToolCalls = result.StartsWith("Repeated discovery tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                                        || result.StartsWith("Repeated failing tool call blocked.", StringComparison.OrdinalIgnoreCase)
+                                        ? repeatedBlockedToolCalls + 1
+                                        : 0;
+                                    if (repeatedBlockedToolCalls >= 3)
                                     {
-                                        AgentPhase.Discovery => hasGroundingEvidence,
-                                        AgentPhase.Editing => phaseHadSuccessfulMutation,
-                                        AgentPhase.Triage => throw new NotImplementedException(),
-                                        AgentPhase.Planning => throw new NotImplementedException(),
-                                        AgentPhase.Verification => throw new NotImplementedException(),
-                                        AgentPhase.Answering => throw new NotImplementedException(),
-                                        _ => true
-                                    };
-                                    if (canAdvancePhase && !isLastPhase)
+                                        var canAdvancePhase = phase switch
+                                        {
+                                            AgentPhase.Discovery => hasGroundingEvidence,
+                                            AgentPhase.Editing => phaseHadSuccessfulMutation,
+                                            AgentPhase.Triage => throw new NotImplementedException(),
+                                            AgentPhase.Planning => throw new NotImplementedException(),
+                                            AgentPhase.Verification => throw new NotImplementedException(),
+                                            AgentPhase.Answering => throw new NotImplementedException(),
+                                            _ => true
+                                        };
+                                        if (canAdvancePhase && !isLastPhase)
+                                        {
+                                            await _logger.LogAsync("phase_force_advance", new
+                                            {
+                                                phase = phase.ToString(),
+                                                step = phaseStep,
+                                                reason = "repeated_blocked_tool_calls",
+                                                tool = toolName,
+                                                mode = "native_tools"
+                                            });
+                                            phaseDone = true;
+                                        }
+
+                                        if (phaseDone)
+                                        {
+                                            break;
+                                        }
+
+                                        var blocker = $"Blocked: the agent is repeatedly retrying {toolName} with the same input after explicit loop-prevention errors.";
+                                        _events.Add(AgentEventType.Final, "Final", blocker);
+                                        await _logger.LogAsync("final", new
+                                        {
+                                            text = blocker,
+                                            mode = "native_tools"
+                                        });
+                                        Console.WriteLine(blocker);
+                                        return;
+                                    }
+
+                                    if (IsGroundingEvidence(toolName, result))
                                     {
-                                        await _logger.LogAsync("phase_force_advance", new
+                                        hasGroundingEvidence = true;
+                                        _state.GroundingEvidenceBytes += result.Length;
+                                    }
+
+                                    TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
+                                    if (_state.LastTool is { IsError: false })
+                                    {
+                                        if (MutationToolNames.Contains(toolName))
+                                        {
+                                            reportMutation(true);
+                                            phaseHadSuccessfulMutation = true;
+                                            foreach (var path in ExtractMutationPaths(toolName, input, result))
+                                            {
+                                                var entry = $"{toolName} -> {path}";
+                                                if (!mutationLog.Contains(entry, StringComparer.Ordinal))
+                                                {
+                                                    mutationLog.Add(entry);
+                                                }
+                                            }
+                                        }
+
+                                        if (isLastPhase && await TryCompleteRunAsync(task, toolName, input, result))
+                                        {
+                                            return;
+                                        }
+                                    }
+
+                                    if (toolName == "run_command")
+                                    {
+                                        analysis = await _analyzer.AnalyzeAsync(result);
+                                        await _logger.LogAsync("command_analysis", new
                                         {
                                             phase = phase.ToString(),
                                             step = phaseStep,
-                                            reason = "repeated_blocked_tool_calls",
-                                            tool = toolName,
+                                            analysis,
                                             mode = "native_tools"
                                         });
-                                        phaseDone = true;
-                                    }
-
-                                    if (phaseDone)
-                                    {
-                                        break;
-                                    }
-
-                                    var blocker = $"Blocked: the agent is repeatedly retrying {toolName} with the same input after explicit loop-prevention errors.";
-                                    _events.Add(AgentEventType.Final, "Final", blocker);
-                                    await _logger.LogAsync("final", new
-                                    {
-                                        text = blocker,
-                                        mode = "native_tools"
-                                    });
-                                    Console.WriteLine(blocker);
-                                    return;
-                                }
-
-                                if (IsGroundingEvidence(toolName, result))
-                                {
-                                    hasGroundingEvidence = true;
-                                    _state.GroundingEvidenceBytes += result.Length;
-                                }
-
-                                TrackToolCall(toolName, normalizedInput, result, successfulDiscoveryCalls, failedToolCalls);
-                                if (_state.LastTool is { IsError: false })
-                                {
-                                    if (MutationToolNames.Contains(toolName))
-                                    {
-                                        reportMutation(true);
-                                        phaseHadSuccessfulMutation = true;
-                                        foreach (var path in ExtractMutationPaths(toolName, input, result))
+                                        if (!result.Contains("\"ExitCode\": 0"))
                                         {
-                                            var entry = $"{toolName} -> {path}";
-                                            if (!mutationLog.Contains(entry, StringComparer.Ordinal))
+                                            failedRuns++;
+                                            if (failedRuns >= _config.MaxFailedCommandAttempts)
                                             {
-                                                mutationLog.Add(entry);
+                                                messages.Add(new LlmChatMessage("user", "Maximum failed command attempts reached. Return the blocker or choose a different recovery tool."));
                                             }
                                         }
-                                    }
-
-                                    if (isLastPhase && await TryCompleteRunAsync(task, toolName, input, result))
-                                    {
-                                        return;
-                                    }
-                                }
-
-                                if (toolName == "run_command")
-                                {
-                                    analysis = await _analyzer.AnalyzeAsync(result);
-                                    await _logger.LogAsync("command_analysis", new
-                                    {
-                                        phase = phase.ToString(),
-                                        step = phaseStep,
-                                        analysis,
-                                        mode = "native_tools"
-                                    });
-                                    if (!result.Contains("\"ExitCode\": 0"))
-                                    {
-                                        failedRuns++;
-                                        if (failedRuns >= _config.MaxFailedCommandAttempts)
+                                        else
                                         {
-                                            messages.Add(new LlmChatMessage("user", "Maximum failed command attempts reached. Return the blocker or choose a different recovery tool."));
+                                            failedRuns = 0;
                                         }
-                                    }
-                                    else
-                                    {
-                                        failedRuns = 0;
                                     }
                                 }
                             }
@@ -453,8 +446,8 @@ public sealed partial class AgentLoop
             if (!phaseDone && !isLastPhase && globalStep < _config.MaxAgentSteps)
             {
                 var blocker = phase is AgentPhase.Editing
-                    ? "Blocked: Editing phase exhausted its step budget before completing a required write. The agent will not advance until it makes the docs change and returns PHASE_DONE."
-                    : $"Blocked: {phase} phase exhausted its step budget before returning PHASE_DONE. The agent will not advance to the next phase automatically.";
+                    ? "Blocked: Editing phase exhausted its step budget before completing a required write. The agent will not advance until it makes the docs change and calls phase_complete."
+                    : $"Blocked: {phase} phase exhausted its step budget before calling phase_complete. The agent will not advance to the next phase automatically.";
                 _events.Add(AgentEventType.Final, "Final", blocker);
                 await _logger.LogAsync("final", new
                 {
@@ -772,6 +765,8 @@ public sealed partial class AgentLoop
     {
         return toolName switch
         {
+            "phase_complete" when result.StartsWith("phase_complete rejected:", StringComparison.OrdinalIgnoreCase)
+                => "Do not call phase_complete again until you satisfy the rejection reason. Gather more evidence in Discovery, write a file successfully in Editing, or finish the remaining required work for this phase first.",
             "code_map" when !result.StartsWith("code_map: no source files", StringComparison.OrdinalIgnoreCase)
                 => "code_map gave you the repo skeleton. Next, pick 3-6 files from the map and call read_ranges on them to get concrete code before drafting any document.",
             "semantic_search" when !result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
@@ -945,6 +940,49 @@ public sealed partial class AgentLoop
 
         return result;
     }
+
+    private async Task<(string Result, bool PhaseDone)> ExecutePhaseCompleteToolAsync(ITool tool, string input, AgentPhase phase, int phaseStep, bool hasGroundingEvidence, bool phaseHadSuccessfulMutation, bool isLastToolCall)
+    {
+        string result;
+        if (!isLastToolCall)
+        {
+            result = Record(tool, input, "phase_complete rejected: it must be the last tool call in the response. Finish all other tool calls first, then call phase_complete.", true);
+            return (result, false);
+        }
+
+        if (phase is AgentPhase.Discovery && !hasGroundingEvidence)
+        {
+            result = Record(tool, input, "phase_complete rejected: gather grounding evidence with a read/search tool before advancing.", true);
+            return (result, false);
+        }
+
+        if (phase is AgentPhase.Editing && !phaseHadSuccessfulMutation)
+        {
+            result = Record(tool, input, "phase_complete rejected: Editing requires at least one successful file mutation before advancing.", true);
+            return (result, false);
+        }
+
+        try
+        {
+            Console.WriteLine($"Running: {tool.Name}");
+            result = Record(tool, input, await tool.RunAsync(input), false);
+        }
+        catch (Exception ex)
+        {
+            result = Record(tool, input, $"phase_complete rejected: tool failed: {ex.Message}", true);
+            return (result, false);
+        }
+
+        await _logger.LogAsync("phase_done_signal", new
+        {
+            phase = phase.ToString(),
+            step = phaseStep,
+            mode = "native_tools",
+            via = "tool",
+            summary = string.IsNullOrWhiteSpace(input) ? null : input
+        });
+        return (result, true);
+    }
     private static bool IsErrorResult(ITool tool, string result)
     {
         return tool.Name == "run_command"
@@ -1054,6 +1092,7 @@ public sealed partial class AgentLoop
         if (result.StartsWith("Repeated ", StringComparison.OrdinalIgnoreCase)
             || result.StartsWith("Invalid ", StringComparison.OrdinalIgnoreCase)
             || result.StartsWith("Patch ", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("phase_complete rejected:", StringComparison.OrdinalIgnoreCase)
             || result.StartsWith("Tool failed:", StringComparison.OrdinalIgnoreCase)
             || result.Contains("Denied by approval policy", StringComparison.OrdinalIgnoreCase)
             || result.Contains("Approval denied.", StringComparison.OrdinalIgnoreCase)

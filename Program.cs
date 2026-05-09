@@ -42,6 +42,7 @@ static Runtime BuildRuntime(string? sessionId, bool newSession)
     [
         new TodoReadTool(todoStore),
         new TodoWriteTool(todoStore),
+        new PhaseCompleteTool(),
         new RepoTreeTool(ignore, sandbox),
         new SearchTool(repo),
         searchContent,

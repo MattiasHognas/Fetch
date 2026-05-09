@@ -130,7 +130,8 @@ Completed todos: {{completed_todos}}
 
 Hard rules:
 - Use native tool calling when you need more information or need to mutate files. Do NOT print JSON tool envelopes in normal text.
-- When this phase is complete and the run should advance, reply with exactly: PHASE_DONE
+- When this phase is complete and the run should advance, call the phase_complete tool.
+- Do not reply with PHASE_DONE text or add prose that tries to advance the phase without the phase_complete tool.
 - In the final phase, return the final user-facing answer only when the task is actually complete.
 - If a tool fails or is blocked, inspect the result and choose a different tool or different input instead of retrying the exact same failed call.
 - Respect the tool descriptions and expected input shapes.
