@@ -332,7 +332,7 @@ public sealed partial class LlmClient(AgentConfig config) : IDisposable
                     continue;
                 }
 
-                string argumentsJson = function.TryGetProperty("arguments", out JsonElement arguments)
+                var argumentsJson = function.TryGetProperty("arguments", out JsonElement arguments)
                     ? arguments.GetRawText()
                     : "{}";
                 toolCalls.Add(new LlmToolCall(name, argumentsJson));

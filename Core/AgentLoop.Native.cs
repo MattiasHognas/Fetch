@@ -4,9 +4,7 @@ namespace Fetch.Core;
 
 public sealed partial class AgentLoop
 {
-    private ToolSchemaRegistry? _nativeToolRegistry;
-
-    private ToolSchemaRegistry NativeToolRegistry => _nativeToolRegistry ??= new ToolSchemaRegistry(_tools.Values);
+    private ToolSchemaRegistry NativeToolRegistry => field ??= new ToolSchemaRegistry(_tools.Values);
 
     private async Task RunNativeAsync(string task, Action<bool> reportMutation)
     {
@@ -57,8 +55,8 @@ public sealed partial class AgentLoop
 
             transcript = await CompactTranscriptIfNeededAsync(task, transcript, phase);
             (var currentTodo, var completedTodos) = await GetTodoRoutingStateAsync();
-            var phaseTools = PhaseToolPolicy.Filter(_tools.Values, phase).ToArray();
-            var toolDefinitions = ToolSchemaRegistry.BuildDefinitions(phaseTools);
+            ITool[] phaseTools = [.. PhaseToolPolicy.Filter(_tools.Values, phase)];
+            IReadOnlyList<NativeToolDefinition> toolDefinitions = ToolSchemaRegistry.BuildDefinitions(phaseTools);
             var messages = new List<LlmChatMessage>
             {
                 new("system", BuildNativePhasePrompt(task, triage, phase, transcript, currentTodo, completedTodos)),
@@ -144,8 +142,8 @@ public sealed partial class AgentLoop
                 foreach (LlmToolCall toolCall in response.ToolCalls)
                 {
                     var toolName = toolCall.Name;
-                    string input = "";
-                    string result = "";
+                    var input = "";
+                    var result = "";
                     string? analysis = null;
                     var executedTool = false;
 
@@ -216,6 +214,10 @@ public sealed partial class AgentLoop
                                 {
                                     AgentPhase.Discovery => hasGroundingEvidence,
                                     AgentPhase.Editing => phaseHadSuccessfulMutation,
+                                    AgentPhase.Triage => throw new NotImplementedException(),
+                                    AgentPhase.Planning => throw new NotImplementedException(),
+                                    AgentPhase.Verification => throw new NotImplementedException(),
+                                    AgentPhase.Answering => throw new NotImplementedException(),
                                     _ => true
                                 };
                                 if (canAdvancePhase && !isLastPhase)

@@ -6,37 +6,28 @@ public sealed class ToolSchemaRegistry(IEnumerable<ITool> tools)
 {
     private readonly Dictionary<string, ITool> _tools = tools.ToDictionary(t => t.Name, StringComparer.Ordinal);
 
-    public static IReadOnlyList<NativeToolDefinition> BuildDefinitions(IEnumerable<ITool> tools)
-    {
-        return [.. tools.Select(ToDefinition)];
-    }
+    public static IReadOnlyList<NativeToolDefinition> BuildDefinitions(IEnumerable<ITool> tools) => [.. tools.Select(ToDefinition)];
 
     public bool TryGetTool(string name, out ITool? tool) => _tools.TryGetValue(name, out tool);
 
     public static string ConvertArguments(ITool tool, string argumentsJson)
     {
-        using JsonDocument doc = JsonDocument.Parse(argumentsJson);
+        using var doc = JsonDocument.Parse(argumentsJson);
         return ConvertArguments(tool, doc.RootElement);
     }
 
     public static string ConvertArguments(ITool tool, JsonElement arguments)
     {
-        if (tool is INativeTool nativeTool)
-        {
-            return nativeTool.ConvertArguments(arguments);
-        }
-
-        if (arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("input", out JsonElement input))
-        {
-            return ReadJsonValue(input);
-        }
-
-        return ReadJsonValue(arguments);
+        return tool is INativeTool nativeTool
+            ? nativeTool.ConvertArguments(arguments)
+            : arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("input", out JsonElement input)
+            ? ReadJsonValue(input)
+            : ReadJsonValue(arguments);
     }
 
     private static NativeToolDefinition ToDefinition(ITool tool)
     {
-        object parameters = tool is INativeTool nativeTool
+        var parameters = tool is INativeTool nativeTool
             ? nativeTool.GetParametersSchema()
             : new Dictionary<string, object?>
             {

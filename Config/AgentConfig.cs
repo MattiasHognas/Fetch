@@ -10,8 +10,14 @@ public sealed class AgentConfig
     public string ModelTransport { get; set; } = "chat";
     public bool EnableNativeToolCalls { get; set; } = true;
     public bool PreserveReasoning { get; set; } = true;
-    public bool? ProviderPreserveThinking { get; set; }
-    public double Temperature { get; set; }
+    public bool? ProviderPreserveThinking
+    {
+        get; set;
+    }
+    public double Temperature
+    {
+        get; set;
+    }
     public int ContextWindowTokens { get; set; } = 100000;
     public int ContextWindowReserveTokens { get; set; } = 8192;
     public string EmbeddingBaseUrl { get; set; } = "http://localhost:11434";
