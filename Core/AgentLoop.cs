@@ -619,7 +619,7 @@ public sealed partial class AgentLoop
 
     private static bool TryGetPinnedTodoTools(string currentTodo, out IReadOnlyList<string> toolNames)
     {
-        toolNames = Array.Empty<string>();
+        toolNames = [];
         if (string.IsNullOrWhiteSpace(currentTodo))
         {
             return false;
@@ -638,7 +638,7 @@ public sealed partial class AgentLoop
             return false;
         }
 
-        string[] parsedTools = marker
+        var parsedTools = marker
             .Replace(" or ", ",", StringComparison.OrdinalIgnoreCase)
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (parsedTools.Length == 0)
