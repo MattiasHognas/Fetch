@@ -6,8 +6,8 @@ namespace Fetch.Tools;
 
 /// <summary>
 /// Returns a compact, line-budgeted map of the repo: directory -> file -> top-level types -> public members.
-/// Uses LSP <c>textDocument/documentSymbol</c> for every supported language; files whose language has no
-/// configured LSP server are listed without symbol detail.
+/// Uses LSP <c>textDocument/documentSymbol</c> for every supported language and fails if any included
+/// language has no configured LSP server or if symbol extraction fails.
 /// Designed to be the FIRST tool called for architecture / overview / refactor-planning tasks so the agent
 /// does not waste its step budget walking <c>repo_tree</c> and reading random files.
 /// </summary>
@@ -29,6 +29,7 @@ public sealed class CodeMapTool(
     public string Name => "code_map";
     public string Description =>
         "Get a repository code map: every source file with its top-level classes/types and public members. "
+        + "Requires configured LSP servers for every language in scope. "
         + "Use this FIRST for architecture, overview, refactor-planning, or 'where is X' tasks before reading individual files. "
         + "Use JSON arguments like {\"path\":\"sub/dir\",\"include\":\"*.cs\"} to scope. Empty input maps the whole repo.";
     public ApprovalMode Approval => ApprovalMode.Auto;
@@ -69,11 +70,7 @@ public sealed class CodeMapTool(
                 LspServerConfig? server = lspExtractor.SelectServerForLanguage(language);
                 if (server is null)
                 {
-                    foreach (FileSymbols fs in group)
-                    {
-                        fs.Note = $"no LSP server configured for {language}";
-                    }
-                    continue;
+                    return $"code_map: requires a configured LSP server for language '{language}'. Narrow the scope or configure that server first.";
                 }
 
                 using var lspCts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(15, _config.Lsp.RequestTimeoutSeconds * 2)));
@@ -83,13 +80,7 @@ public sealed class CodeMapTool(
                 }
                 catch (Exception ex)
                 {
-                    foreach (FileSymbols fs in group)
-                    {
-                        if (fs.Types.Count == 0 && string.IsNullOrEmpty(fs.Note))
-                        {
-                            fs.Note = $"LSP {server.Id} failed: {ex.Message}";
-                        }
-                    }
+                    return $"code_map: LSP server {server.Id} failed while mapping {language}: {ex.Message}";
                 }
             }
         }

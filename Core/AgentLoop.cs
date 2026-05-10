@@ -786,7 +786,9 @@ public sealed partial class AgentLoop
         {
             "phase_complete" when result.StartsWith("phase_complete rejected:", StringComparison.OrdinalIgnoreCase)
                 => "Do not call phase_complete again until you satisfy the rejection reason. Gather more evidence in Discovery, write a file successfully in Editing, or finish the remaining required work for this phase first.",
-            "code_map" when !result.StartsWith("code_map: no source files", StringComparison.OrdinalIgnoreCase)
+            "code_map" when result.StartsWith("code_map: requires a configured LSP server", StringComparison.OrdinalIgnoreCase)
+                => "code_map now requires LSP for every language in scope. Narrow the request to files covered by a configured server or configure the missing language server first.",
+            "code_map" when !IsDiscoveryFailure(result.TrimStart())
                 => "code_map gave you the repo skeleton. Next, pick 3-6 files from the map and call read_ranges on them to get concrete code before drafting any document.",
             "semantic_search" when !result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
                 => "Use these semantic_search results to narrow to 3-8 concrete files with refine_context or read_ranges. Do not jump back to repo_tree with the same broad input.",
@@ -1245,6 +1247,9 @@ public sealed partial class AgentLoop
     private static bool IsDiscoveryFailure(string result)
     {
         return result.StartsWith("Semantic index missing.", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("code_map: no source files", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("code_map: requires a configured LSP server", StringComparison.OrdinalIgnoreCase)
+            || result.StartsWith("code_map: LSP server", StringComparison.OrdinalIgnoreCase)
             || result.StartsWith("No configured LSP server available.", StringComparison.OrdinalIgnoreCase)
             || result.StartsWith("LSP symbol search failed:", StringComparison.OrdinalIgnoreCase)
             || result.StartsWith("LSP references search failed:", StringComparison.OrdinalIgnoreCase)
