@@ -150,7 +150,6 @@ public sealed class AgentConfig
 public sealed class LspConfig
 {
     public bool Enabled { get; set; } = true;
-    public bool FallbackToTextSearch { get; set; } = true;
     public int StartupTimeoutSeconds { get; set; } = 10;
     public int RequestTimeoutSeconds { get; set; } = 20;
     public List<LspServerConfig> Servers

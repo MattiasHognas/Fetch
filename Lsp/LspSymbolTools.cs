@@ -2,12 +2,12 @@ using System.Text.Json;
 
 namespace Fetch.Lsp;
 
-public sealed class LspSymbolSearchTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector, SearchContentTool fallback) : ITool, INativeTool
+public sealed class LspSymbolSearchTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector) : ITool, INativeTool
 {
-    private readonly AgentConfig _config = config; private readonly PathSandbox _sandbox = sandbox; private readonly LspServerSelector _selector = selector; private readonly SearchContentTool _fallback = fallback;
+    private readonly AgentConfig _config = config; private readonly PathSandbox _sandbox = sandbox; private readonly LspServerSelector _selector = selector;
 
     public string Name => "symbol_search";
-    public string Description => "Search code symbols such as classes, functions, methods, interfaces from JSON arguments. Uses LSP if available, otherwise text search.";
+    public string Description => "Search code symbols such as classes, functions, methods, interfaces from JSON arguments. Requires a configured LSP server.";
     public ApprovalMode Approval => ApprovalMode.Auto;
 
     public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
@@ -27,7 +27,7 @@ public sealed class LspSymbolSearchTool(AgentConfig config, PathSandbox sandbox,
         LspServerConfig? server = _selector.SelectForRepo();
         if (server is null)
         {
-            return await Fallback(input, "No configured LSP server available.");
+            return "symbol_search requires a configured LSP server.";
         }
 
         try
@@ -40,9 +40,11 @@ public sealed class LspSymbolSearchTool(AgentConfig config, PathSandbox sandbox,
                 query = input.Trim()
             }, cts.Token);
             var rendered = RenderSymbols(result);
-            return string.IsNullOrWhiteSpace(rendered) ? await Fallback(input, $"LSP server {server.Id} returned no symbols.") : rendered;
+            return string.IsNullOrWhiteSpace(rendered)
+                ? $"LSP server {server.Id} returned no symbols."
+                : rendered;
         }
-        catch (Exception ex) { return await Fallback(input, $"LSP symbol search failed: {ex.Message}"); }
+        catch (Exception ex) { return $"LSP symbol search failed: {ex.Message}"; }
     }
     private async Task InitializeAsync(LspClient client, CancellationToken ct)
     {
@@ -92,17 +94,16 @@ public sealed class LspSymbolSearchTool(AgentConfig config, PathSandbox sandbox,
         }
         return string.Join("\n", lines);
     }
-    private async Task<string> Fallback(string input, string reason) => !_config.Lsp.FallbackToTextSearch ? reason : $"{reason}\n\nFallback search:\n{await _fallback.RunAsync(input)}";
 }
 
 public sealed record ReferenceRequest(string File, int Line, int Character, string Symbol);
 
-public sealed class LspReferencesSearchTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector, SearchContentTool fallback) : ITool, INativeTool
+public sealed class LspReferencesSearchTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector) : ITool, INativeTool
 {
-    private readonly AgentConfig _config = config; private readonly PathSandbox _sandbox = sandbox; private readonly LspServerSelector _selector = selector; private readonly SearchContentTool _fallback = fallback;
+    private readonly AgentConfig _config = config; private readonly PathSandbox _sandbox = sandbox; private readonly LspServerSelector _selector = selector;
 
     public string Name => "references_search";
-    public string Description => "Find references or usages of a symbol from JSON arguments. Uses LSP if available, otherwise text search.";
+    public string Description => "Find references or usages of a symbol from JSON arguments. Requires a configured LSP server.";
     public ApprovalMode Approval => ApprovalMode.Auto;
 
     public object GetParametersSchema() => NativeToolJson.ObjectSchema(new Dictionary<string, object?>
@@ -140,7 +141,7 @@ public sealed class LspReferencesSearchTool(AgentConfig config, PathSandbox sand
         LspServerConfig? server = _selector.SelectForRepo();
         if (server is null)
         {
-            return await Fallback(req.Symbol, "No configured LSP server available.");
+            return "references_search requires a configured LSP server.";
         }
 
         try
@@ -166,9 +167,11 @@ public sealed class LspReferencesSearchTool(AgentConfig config, PathSandbox sand
                 }
             }, cts.Token);
             var rendered = RenderReferences(result);
-            return string.IsNullOrWhiteSpace(rendered) ? await Fallback(req.Symbol, $"LSP server {server.Id} returned no references.") : rendered;
+            return string.IsNullOrWhiteSpace(rendered)
+                ? $"LSP server {server.Id} returned no references."
+                : rendered;
         }
-        catch (Exception ex) { return await Fallback(req.Symbol, $"LSP references search failed: {ex.Message}"); }
+        catch (Exception ex) { return $"LSP references search failed: {ex.Message}"; }
     }
     private async Task InitializeAsync(LspClient client, CancellationToken ct)
     {
@@ -219,5 +222,4 @@ public sealed class LspReferencesSearchTool(AgentConfig config, PathSandbox sand
         }
         return string.Join("\n", lines);
     }
-    private async Task<string> Fallback(string symbol, string reason) => !_config.Lsp.FallbackToTextSearch ? reason : $"{reason}\n\nFallback search:\n{await _fallback.RunAsync(symbol)}";
 }

@@ -7,12 +7,6 @@ public sealed record RelationshipMapRequest(string[] Files, int MaxMethodsPerFil
 
 public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox sandbox, LspServerSelector selector) : ITool, INativeTool
 {
-    [System.Text.RegularExpressions.GeneratedRegex(@"\b(?:class|record|struct|interface|enum)\s+([A-Z][A-Za-z0-9_]*)")]
-    private static partial System.Text.RegularExpressions.Regex TypeDeclRegex();
-
-    [System.Text.RegularExpressions.GeneratedRegex(@"\b([A-Z][A-Za-z0-9_]*)\b")]
-    private static partial System.Text.RegularExpressions.Regex IdentifierRegex();
-
     private readonly AgentConfig _config = config;
     private readonly PathSandbox _sandbox = sandbox;
     private readonly LspServerSelector _selector = selector;
@@ -74,82 +68,9 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
             return $"relationship_map: LSP server {server.Id} failed: {ex.Message}";
         }
 
-        if (edges.Count > 0)
-        {
-            return Render(files, edges);
-        }
-
-        List<RelationshipEdge> staticEdges = await CollectStaticTypeEdgesAsync(files);
-        return staticEdges.Count == 0
-            ? "relationship_map: no call edges found in the selected files."
-            : Render(files, staticEdges, fallback: true);
-    }
-
-    private static async Task<List<RelationshipEdge>> CollectStaticTypeEdgesAsync(List<RelationshipFileModel> files)
-    {
-        var classToFile = new Dictionary<string, string>(StringComparer.Ordinal);
-        var fileSources = new Dictionary<string, string>(StringComparer.Ordinal);
-        var fileClasses = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        System.Text.RegularExpressions.Regex declRegex = TypeDeclRegex();
-
-        foreach (RelationshipFileModel file in files)
-        {
-            string text;
-            try
-            {
-                text = await File.ReadAllTextAsync(file.AbsolutePath);
-            }
-            catch
-            {
-                continue;
-            }
-            fileSources[file.RelativePath] = text;
-            var locals = new List<string>();
-            foreach (System.Text.RegularExpressions.Match m in declRegex.Matches(text))
-            {
-                var name = m.Groups[1].Value;
-                if (!classToFile.ContainsKey(name))
-                {
-                    classToFile[name] = file.RelativePath;
-                }
-                if (!locals.Contains(name, StringComparer.Ordinal))
-                {
-                    locals.Add(name);
-                }
-            }
-            fileClasses[file.RelativePath] = locals;
-        }
-
-        if (classToFile.Count == 0)
-        {
-            return [];
-        }
-
-        var edges = new List<RelationshipEdge>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        System.Text.RegularExpressions.Regex identifierRegex = IdentifierRegex();
-        foreach ((var relPath, var src) in fileSources)
-        {
-            if (!fileClasses.TryGetValue(relPath, out List<string>? owners) || owners.Count == 0)
-            {
-                continue;
-            }
-            var owner = owners[0];
-            foreach (System.Text.RegularExpressions.Match m in identifierRegex.Matches(src))
-            {
-                var token = m.Groups[1].Value;
-                if (token == owner || !classToFile.TryGetValue(token, out var targetFile) || targetFile == relPath)
-                {
-                    continue;
-                }
-                var key = $"{owner}|{token}";
-                if (seen.Add(key))
-                {
-                    edges.Add(new RelationshipEdge(owner, token, relPath));
-                }
-            }
-        }
-        return edges;
+        return edges.Count > 0
+            ? Render(files, edges)
+            : $"relationship_map: LSP server {server.Id} returned no call edges for the selected files.";
     }
 
     private List<RelationshipFileModel> LoadFiles(IEnumerable<string> requestedFiles)
@@ -474,7 +395,7 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
         }
     }
 
-    private static string Render(List<RelationshipFileModel> files, List<RelationshipEdge> edges, bool fallback = false)
+    private static string Render(List<RelationshipFileModel> files, List<RelationshipEdge> edges)
     {
         var sb = new StringBuilder();
         _ = sb.Append("relationship_map: ").Append(files.Count).Append(" file(s)\n\nFiles\n");
@@ -482,13 +403,10 @@ public sealed partial class RelationshipMapTool(AgentConfig config, PathSandbox 
         {
             _ = sb.Append("- ").Append(file.RelativePath).Append('\n');
         }
-        _ = sb.Append(fallback
-            ? "\nClass references (static fallback; LSP call hierarchy returned no edges)\n"
-            : "\nCall edges (LSP)\n");
-        var verb = fallback ? "--uses-->" : "--calls-->";
+        _ = sb.Append("\nCall edges (LSP)\n");
         foreach (RelationshipEdge edge in edges.Take(80))
         {
-            _ = sb.Append("- ").Append(edge.From).Append(' ').Append(verb).Append(' ').Append(edge.To).Append(" [").Append(edge.SourceFile).Append("]\n");
+            _ = sb.Append("- ").Append(edge.From).Append(" --calls--> ").Append(edge.To).Append(" [").Append(edge.SourceFile).Append("]\n");
         }
         return sb.ToString().TrimEnd();
     }
