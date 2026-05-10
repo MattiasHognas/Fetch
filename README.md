@@ -5,9 +5,10 @@ A local terminal/TUI coding-agent harness for Ollama/Qwen-style local LLMs.
 ## Requirements
 
 - .NET 10 SDK
-- Ollama running locally
 - `rg` / ripgrep recommended
-- Optional embedding model: `ollama pull nomic-embed-text`
+- Ollama running locally
+- Thinking model with tool support: `ollama pull qwen3.6:35b` 
+- Embedding model: `ollama pull nomic-embed-text:latest`
 - Optional LSP servers: `gopls`, `rust-analyzer`, `typescript-language-server`, `csharp-ls`, etc.
 
 ### Install Ollama
@@ -21,7 +22,7 @@ ollama --version
 ```
 
 ### Run Ollama
-Load the recommended Qwen model
+Load the thinking model
 ```bash
 ollama pull qwen3.6:35b
 curl http://localhost:11434/api/chat -d '{
@@ -37,9 +38,7 @@ curl http://localhost:11434/api/chat -d '{
   }
 }'
 ```
-Tool calling is required. Pass a `tools` array to `/api/chat` and consume `message.tool_calls` plus `message.thinking` from the response.
-
-Ollama tag names do not always match upstream Qwen naming exactly; check the installed Ollama tags before changing `ModelName`.
+Tool calling is required. We pass a `tools` array to `/api/chat` and consume `message.tool_calls` plus `message.thinking` from the response.
 
 Load embedding model
 ```bash
@@ -58,7 +57,7 @@ dotnet restore
 dotnet run
 ```
 
-Default command opens the Terminal.Gui TUI.
+Default command opens the TUI.
 
 Fallback CLI:
 
@@ -67,7 +66,7 @@ dotnet run -- chat
 dotnet run -- agent "fix failing tests"
 ```
 
-The agent now requires chat-based native tool calling with Qwen, reasoning preservation, and a 100k context window. Prompt-facing budgets expose token settings for recent state and tool results, while the older char limits remain as compatibility caps. Keep the larger tool/context limits if you want the agent to benefit from that wider context.
+The agent requires chat-based native tool calling with Qwen, reasoning preservation, and a 100k context window. Prompt-facing budgets expose token settings for recent state and tool results, while the older char limits remain as compatibility caps. Keep the larger tool/context limits if you want the agent to benefit from that wider context.
 
 Useful slash commands in chat mode:
 
