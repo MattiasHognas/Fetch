@@ -66,7 +66,9 @@ dotnet run -- chat
 dotnet run -- agent "fix failing tests"
 ```
 
-The agent requires chat-based native tool calling with Qwen, reasoning preservation, and a 100k context window. Prompt-facing budgets expose token settings for recent state and tool results, while the older char limits remain as compatibility caps. Keep the larger tool/context limits if you want the agent to benefit from that wider context.
+The agent requires chat-based native tool calling, reasoning preservation, and a 100k context window.
+
+Token budget settings can be changed if using a different context window size, but smaller sizes might ruin the context during compaction.
 
 Useful slash commands in chat mode:
 
